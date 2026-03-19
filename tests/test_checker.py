@@ -46,3 +46,13 @@ def test_warnings(tmp_path, monkeypatch):
     assert any("Non-anonymous email" in w for w in warns)
     assert any("Suspicious wording" in w for w in warns)
     assert any("Figures/tables/appendix" in w for w in warns)
+
+
+def test_min_pages_warning(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "short.pdf"
+    texts = ["Page 1 text", "Page 2 text"]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), min_pages=3)
+    assert any("less than minimum required" in w for w in warns)

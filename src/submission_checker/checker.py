@@ -85,6 +85,7 @@ def detect_style(text: str) -> str:
 def check_file(
     file_path: str,
     max_pages: Optional[int] = None,
+    min_pages: Optional[int] = None,
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
@@ -108,6 +109,9 @@ def check_file(
 
     if max_pages is not None and num_pages > max_pages:
         warnings.append(f"Number of pages ({num_pages}) exceeds limit ({max_pages}).")
+
+    if min_pages is not None and num_pages < min_pages:
+        warnings.append(f"Number of pages ({num_pages}) is less than minimum required ({min_pages}).")
 
     ref_page = find_references_page(texts)
     if ref_page is not None and max_pages is not None and ref_page > max_pages:
@@ -178,6 +182,7 @@ def check_file(
 def check_folder(
     folder_path: str,
     max_pages: Optional[int] = None,
+    min_pages: Optional[int] = None,
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
@@ -216,7 +221,14 @@ def check_folder(
         print(f"Checking file: {rel_path}")
         
         try:
-            warnings = check_file(str(pdf_file), max_pages, style, timeout=timeout, main_pages=main_pages)
+            warnings = check_file(
+                str(pdf_file),
+                max_pages=max_pages,
+                min_pages=min_pages,
+                style=style,
+                timeout=timeout,
+                main_pages=main_pages,
+            )
         except Exception as e:
             warnings = [f"Error processing file: {str(e)[:100]}"]
         
@@ -254,6 +266,11 @@ def main():
         help="Maximum seconds to wait when extracting text from each PDF (default: 10)",
     )
     parser.add_argument(
+        "--min-pages",
+        type=int,
+        help="Minimum total pages required (main text + references)",
+    )
+    parser.add_argument(
         "--csv",
         help="Path to output CSV report file (for folder checks)",
     )
@@ -272,7 +289,14 @@ def main():
     # Handle single file
     if args.file:
         print(f"Checking file: {args.file}")
-        warnings = check_file(args.file, args.max_pages, args.style, timeout=args.timeout, main_pages=args.main_pages)
+        warnings = check_file(
+            args.file,
+            max_pages=args.max_pages,
+            min_pages=args.min_pages,
+            style=args.style,
+            timeout=args.timeout,
+            main_pages=args.main_pages,
+        )
         if warnings:
             print("Warnings:")
             for w in warnings:
@@ -284,7 +308,14 @@ def main():
 
     # Handle folder
     if args.folder:
-        result = check_folder(args.folder, args.max_pages, args.style, timeout=args.timeout, main_pages=args.main_pages)
+        result = check_folder(
+            args.folder,
+            max_pages=args.max_pages,
+            min_pages=args.min_pages,
+            style=args.style,
+            timeout=args.timeout,
+            main_pages=args.main_pages,
+        )
         
         if "error" in result:
             print(f"Error: {result['error']}")

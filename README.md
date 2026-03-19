@@ -17,6 +17,7 @@ A command-line tool for academic conference submissions that automatically valid
 - `--file <path>`: Path to a single PDF file to check
 - `--folder <path>`: Path to folder containing PDFs to check (recursive)
 - `--max-pages <int>`: Maximum total pages allowed (main text + references)
+- `--min-pages <int>`: Minimum total pages required (main text + references)
 - `--main-pages <int>`: Maximum pages for main text (default: 10)
 - `--style <acm|ieee>`: Expected citation style for validation
 - `--timeout <int>`: Maximum seconds for PDF text extraction (default: 10)
@@ -27,9 +28,10 @@ A command-line tool for academic conference submissions that automatically valid
 The tool performs the following checks on each PDF. All checks require successful text extraction from the PDF.
 
 ### 1. Page Limit Check
-- **Logic**: Counts the total number of pages in the PDF. If the count exceeds the specified `--max-pages`, a warning is issued.
-- **Configuration**: `--max-pages` (integer, optional). `--main-pages` (integer, default 10) specifies the limit for main text.
+- **Logic**: Counts the total number of pages in the PDF. If the count exceeds the specified `--max-pages`, a warning is issued. If the count is less than the specified `--min-pages`, a warning is issued.
+- **Configuration**: `--max-pages` (integer, optional), `--min-pages` (integer, optional). `--main-pages` (integer, default 10) specifies the limit for main text.
 - **Example**: `--max-pages 12 --main-pages 10` warns if PDF has more than 12 pages total.
+- **Example (min)**: `--min-pages 8` warns if PDF has fewer than 8 pages total.
 
 ### 2. References Placement Check
 - **Logic**: Scans each page for a line starting with "reference" or "references" (case-insensitive). Warns if references start after the total page limit or if they start after main text limit +1 (implying main text exceeds limit). If no references found, warns if total pages exceed main text limit.
@@ -139,16 +141,6 @@ This generates a CSV file with columns: Filename, Status, Issues.
 
 Exit code: **0** if all passed, **1** if any failed.
 
-### Options
-- `--file PATH`: Path to a single PDF file.
-- `--folder PATH`: Path to a directory containing PDFs (scanned recursively).
-- `--max-pages N`: Maximum allowed pages (optional).
-- `--style STYLE`: Expected style ('acm' or 'ieee', optional).
-- `--timeout N`: Timeout in seconds for PDF text extraction (default: 10).
-- `--csv PATH`: Output results to a CSV file (only with `--folder`).
-
-Note: Either `--file` or `--folder` must be provided, not both.
-
 ## Troubleshooting
 
 - **"Could not extract text from PDF"**: The PDF may be scanned (image-only), encrypted, or corrupted. Try re-saving as a text PDF or using OCR tools like `ocrmypdf`.
@@ -184,8 +176,12 @@ Summary: 2 passed, 1 failed out of 3 files
 
 - `--file <path>` – Check a single PDF file
 - `--folder <path>` – Check all PDFs in a folder (recursive search for `*.pdf`)
-- `--max-pages <num>` – Page limit for the submission (optional)
+- `--max-pages <num>` – Maximum total pages allowed (optional)
+- `--min-pages <num>` – Minimum total pages required (optional)
+- `--main-pages <num>` – Maximum main text pages (default 10)
 - `--style {acm,ieee}` – Enforce a specific citation style (optional)
+- `--timeout <num>` – Timeout in seconds for PDF text extraction (default: 10)
+- `--csv <path>` – Output results to CSV (folder only)
 
 **Note:** Provide either `--file` or `--folder`, not both.
 
