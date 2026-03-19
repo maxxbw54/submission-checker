@@ -194,6 +194,7 @@ Summary: 2 passed, 1 failed out of 3 files
 ```bash
 # Single file, no style requirement
 submission-checker --file paper.pdf --max-pages 10
+```
 
 # Single file, ACM style required
 submission-checker --file paper.pdf --max-pages 8 --style acm
@@ -223,3 +224,7 @@ pytest tests/test_checker.py -v -s
 3. **Metadata Inspection** – Checks PDF metadata for identifying information
 4. **Style Detection** – Analyzes text for ACM/IEEE keywords
 5. **Reporting** – Lists all issues found with line-by-line details
+
+## Contributing
+
+We welcome contributions! If you encounter any issues or have suggestions for improvements, please raise them on our [GitHub Issues](https://github.com/maxxbw54/submission-checker/issues) page. We also encourage you to submit pull requests for bug fixes or new features.
