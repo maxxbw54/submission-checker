@@ -1,6 +1,7 @@
 """Entry point for submission checker CLI."""
 import re
 import sys
+import csv
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -86,6 +87,7 @@ def check_file(
     max_pages: Optional[int] = None,
     style: Optional[str] = None,
     timeout: int = 10,
+    main_pages: Optional[int] = None,
 ) -> List[str]:
     warnings: List[str] = []
     path = Path(file_path)
@@ -110,6 +112,15 @@ def check_file(
     ref_page = find_references_page(texts)
     if ref_page is not None and max_pages is not None and ref_page > max_pages:
         warnings.append(f"References start on page {ref_page}, which is after page limit {max_pages}.")
+    
+    # Check if references start too late (implying main text exceeds limit)
+    main_pages_limit = main_pages if main_pages is not None else 10  # Default to 10 for ICSE
+    if ref_page is not None and ref_page > main_pages_limit + 1:
+        warnings.append(f"References start on page {ref_page}, which implies main text exceeds {main_pages_limit} pages.")
+    
+    # If no references found, check if total pages exceed main text limit
+    if ref_page is None and num_pages > main_pages_limit:
+        warnings.append(f"No references section found, and total pages ({num_pages}) exceed main text limit ({main_pages_limit}).")
 
     # pages after references
     after_refs = []
@@ -153,10 +164,13 @@ def check_file(
             warnings.append(f"Suspicious wording detected: '{phrase}'.")
 
     # metadata
+    identifying_keys = ['/Author', '/Title', '/Subject', '/Keywords']
     if metadata:
-        meta_str = " ".join(str(v) for v in metadata.values() if v)
-        if meta_str:
-            warnings.append("PDF metadata contains potentially identifying information.")
+        for key in identifying_keys:
+            value = metadata.get(key)
+            if value and str(value).strip():
+                warnings.append("PDF metadata contains potentially identifying information.")
+                break
 
     return warnings
 
@@ -166,6 +180,7 @@ def check_folder(
     max_pages: Optional[int] = None,
     style: Optional[str] = None,
     timeout: int = 10,
+    main_pages: Optional[int] = None,
 ) -> dict:
     """Check all PDFs in a folder and subfolders, returning results.
     
@@ -198,8 +213,10 @@ def check_folder(
         except ValueError:
             rel_path = pdf_file
         
+        print(f"Checking file: {rel_path}")
+        
         try:
-            warnings = check_file(str(pdf_file), max_pages, style, timeout=timeout)
+            warnings = check_file(str(pdf_file), max_pages, style, timeout=timeout, main_pages=main_pages)
         except Exception as e:
             warnings = [f"Error processing file: {str(e)[:100]}"]
         
@@ -218,7 +235,13 @@ def main():
     parser = argparse.ArgumentParser(description="Check academic submission PDFs for policy issues.")
     parser.add_argument("--file", help="Path to a single PDF file")
     parser.add_argument("--folder", help="Path to folder containing PDFs to check")
-    parser.add_argument("--max-pages", type=int, help="Page limit for the submission")
+    parser.add_argument("--max-pages", type=int, help="Maximum total pages allowed (main text + references)")
+    parser.add_argument(
+        "--main-pages",
+        type=int,
+        default=10,
+        help="Maximum pages for main text (default: 10). References must start after this.",
+    )
     parser.add_argument(
         "--style",
         choices=["acm", "ieee"],
@@ -230,6 +253,10 @@ def main():
         default=10,
         help="Maximum seconds to wait when extracting text from each PDF (default: 10)",
     )
+    parser.add_argument(
+        "--csv",
+        help="Path to output CSV report file (for folder checks)",
+    )
     args = parser.parse_args()
 
     # Check that at least one of --file or --folder is provided
@@ -238,10 +265,14 @@ def main():
     
     if args.file and args.folder:
         parser.error("Provide either --file or --folder, not both.")
+    
+    if args.csv and not args.folder:
+        parser.error("--csv can only be used with --folder.")
 
     # Handle single file
     if args.file:
-        warnings = check_file(args.file, args.max_pages, args.style, timeout=args.timeout)
+        print(f"Checking file: {args.file}")
+        warnings = check_file(args.file, args.max_pages, args.style, timeout=args.timeout, main_pages=args.main_pages)
         if warnings:
             print("Warnings:")
             for w in warnings:
@@ -253,7 +284,7 @@ def main():
 
     # Handle folder
     if args.folder:
-        result = check_folder(args.folder, args.max_pages, args.style, timeout=args.timeout)
+        result = check_folder(args.folder, args.max_pages, args.style, timeout=args.timeout, main_pages=args.main_pages)
         
         if "error" in result:
             print(f"Error: {result['error']}")
@@ -263,20 +294,32 @@ def main():
             print(result["message"])
             sys.exit(0)
         
-        # Print results
-        print(f"\n{'Filename':<40} {'Status':<10} {'Issues'}")
-        print("=" * 70)
-        
-        for filename, warnings in result["results"]:
-            status = "✓ PASS" if not warnings else "✗ FAIL"
-            num_issues = len(warnings)
-            print(f"{filename:<40} {status:<10} {num_issues}")
-            if warnings:
-                for w in warnings:
-                    print(f"  - {w}")
-        
-        print("\n" + "=" * 70)
-        print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
+        if args.csv:
+            # Write to CSV
+            with open(args.csv, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Filename', 'Status', 'Issues'])
+                for filename, warnings in result["results"]:
+                    status = "PASS" if not warnings else "FAIL"
+                    issues = "; ".join(warnings) if warnings else ""
+                    writer.writerow([filename, status, issues])
+            print(f"CSV report written to {args.csv}")
+            print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
+        else:
+            # Print results
+            print(f"\n{'Filename':<40} {'Status':<10} {'Issues'}")
+            print("=" * 70)
+            
+            for filename, warnings in result["results"]:
+                status = "✓ PASS" if not warnings else "✗ FAIL"
+                num_issues = len(warnings)
+                print(f"{filename:<40} {status:<10} {num_issues}")
+                if warnings:
+                    for w in warnings:
+                        print(f"  - {w}")
+            
+            print("\n" + "=" * 70)
+            print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
         
         sys.exit(1 if result["failed"] > 0 else 0)
 

@@ -12,6 +12,57 @@ A command-line tool for academic conference submissions that automatically valid
 - **Suspicious wording** – Identify potentially revealing phrases like "our previous paper [3]".
 - **Metadata inspection** – Inspect PDF metadata for possible author information that could reveal identity.
 
+## Options
+
+- `--file <path>`: Path to a single PDF file to check
+- `--folder <path>`: Path to folder containing PDFs to check (recursive)
+- `--max-pages <int>`: Maximum total pages allowed (main text + references)
+- `--main-pages <int>`: Maximum pages for main text (default: 10)
+- `--style <acm|ieee>`: Expected citation style for validation
+- `--timeout <int>`: Maximum seconds for PDF text extraction (default: 10)
+- `--csv <path>`: Output CSV report file (requires `--folder`)
+
+## Check Details
+
+The tool performs the following checks on each PDF. All checks require successful text extraction from the PDF.
+
+### 1. Page Limit Check
+- **Logic**: Counts the total number of pages in the PDF. If the count exceeds the specified `--max-pages`, a warning is issued.
+- **Configuration**: `--max-pages` (integer, optional). `--main-pages` (integer, default 10) specifies the limit for main text.
+- **Example**: `--max-pages 12 --main-pages 10` warns if PDF has more than 12 pages total.
+
+### 2. References Placement Check
+- **Logic**: Scans each page for a line starting with "reference" or "references" (case-insensitive). Warns if references start after the total page limit or if they start after main text limit +1 (implying main text exceeds limit). If no references found, warns if total pages exceed main text limit.
+- **Configuration**: Requires `--max-pages` and uses `--main-pages` (default 10).
+- **Note**: Ensures main text does not exceed limit and references are properly placed.
+
+### 3. Figures/Tables/Appendix After References Check
+- **Logic**: After locating the references section, scans subsequent pages for keywords "Figure", "Table", or "Appendix" (case-insensitive). Lists page numbers where found.
+- **Configuration**: None (automatic if references are found).
+- **Note**: Uses word boundaries to avoid false positives.
+
+### 4. Style Detection Check
+- **Logic**: Searches the first two pages for style-specific keywords:
+  - ACM: "acm" or "association for computing machinery"
+  - IEEE: "ieee" or "institute of electrical and electronics engineers"
+- **Configuration**: `--style acm` or `--style ieee` (optional). If specified, warns on mismatch. If not, reports detected style.
+- **Note**: Only reports if ACM or IEEE is detected.
+
+### 5. Email Detection Check
+- **Logic**: Uses regex to search for email patterns on the first page.
+- **Configuration**: None (always checked).
+- **Regex**: `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`
+
+### 6. Suspicious Wording Check
+- **Logic**: Searches the entire document for predefined phrases (case-insensitive).
+- **Configuration**: Hardcoded phrases: "our previous paper", "in our previous work".
+- **Note**: Warns for each matching phrase found.
+
+### 7. Metadata Check
+- **Logic**: Extracts PDF metadata (e.g., author, title) and checks if any fields contain text.
+- **Configuration**: None (always checked).
+- **Note**: Metadata often includes identifying information like author names.
+
 ## Installation
 
 ```bash
@@ -31,13 +82,19 @@ pip install -e .
 ### Check a Single PDF
 
 ```bash
-submission-checker --file paper.pdf --max-pages 8 --style acm
+submission-checker --file paper.pdf --max-pages 12 --main-pages 10 --style ieee
 ```
 
-Output (if issues found):
+This checks a single PDF with:
+- Maximum total pages: 12 (main text + references)
+- Maximum main text pages: 10 (references must start after page 10)
+- Expected style: IEEE
+
+Output:
 ```
+Checking file: paper.pdf
 Warnings:
- - Number of pages (10) exceeds limit (8).
+ - Number of pages (13) exceeds limit (12).
  - Non-anonymous email detected on page 1.
  - Suspicious wording detected: 'our previous paper'.
 ```
@@ -46,13 +103,70 @@ Exit code: **0** if no issues, **1** if warnings found.
 
 ### Scan a Folder of PDFs
 
-Check all PDFs in a directory:
+Check all PDFs in a directory (recursive):
 
 ```bash
-submission-checker --folder submissions --max-pages 8 --style acm
+submission-checker --folder submissions --max-pages 12 --main-pages 10 --style ieee --timeout 30 --csv report.csv
 ```
 
+This scans all PDFs in the `submissions` folder with the same page limits and style check, saves results to `report.csv`.
+
 Output:
+```
+Checking file: paper1.pdf
+Checking file: paper2.pdf
+Checking file: paper3.pdf
+Filename                                      Status     Issues
+================================================== ===== ========
+paper1.pdf                                    ✓ PASS     0
+paper2.pdf                                    ✗ FAIL     2
+  - Number of pages (10) exceeds limit (8).
+  - Non-anonymous email detected on page 1.
+paper3.pdf                                    ✗ FAIL     1
+  - Could not extract text from PDF (possibly corrupted, encrypted, or slow to read).
+
+================================================== ===== ========
+Summary: 1 passed, 2 failed out of 3 files
+```
+
+For CSV output:
+
+```bash
+submission-checker --folder submissions --max-pages 8 --style acm --csv report.csv
+```
+
+This generates a CSV file with columns: Filename, Status, Issues.
+
+Exit code: **0** if all passed, **1** if any failed.
+
+### Options
+- `--file PATH`: Path to a single PDF file.
+- `--folder PATH`: Path to a directory containing PDFs (scanned recursively).
+- `--max-pages N`: Maximum allowed pages (optional).
+- `--style STYLE`: Expected style ('acm' or 'ieee', optional).
+- `--timeout N`: Timeout in seconds for PDF text extraction (default: 10).
+- `--csv PATH`: Output results to a CSV file (only with `--folder`).
+
+Note: Either `--file` or `--folder` must be provided, not both.
+
+## Troubleshooting
+
+- **"Could not extract text from PDF"**: The PDF may be scanned (image-only), encrypted, or corrupted. Try re-saving as a text PDF or using OCR tools like `ocrmypdf`.
+- **Slow scans on network drives**: Increase `--timeout` (e.g., `--timeout 60`) or copy files locally first.
+- **No warnings on expected issues**: Ensure the PDF has extractable text. Test with `pdftotext file.pdf -` to verify.
+- **Import errors**: Install dependencies with `pip install -r requirements.txt`.
+
+## Development
+
+Run tests:
+```bash
+pytest
+```
+
+Build package:
+```bash
+pip install -e .
+```
 ```
 Filename                                 Status     Issues
 ======================================================================
