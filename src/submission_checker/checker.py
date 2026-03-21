@@ -8,8 +8,10 @@ from typing import List, Tuple, Optional
 from pypdf import PdfReader
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Generic institutional emails that should not be flagged as anonymity issues
+ALLOWED_EMAILS = {"authors@instituitons.edu", "email@email.email"}
 SUSPICIOUS_PHRASES = [r"our previous paper", r"in our previous work"]
-REFERENCES_HEADER = re.compile(r"^references?$", flags=re.IGNORECASE)
+REFERENCES_HEADER = re.compile(r"^references?\s*:?\s*$", flags=re.IGNORECASE)
 STYLE_KEYWORDS = {
     "acm": [r"acm", r"association for computing machinery"],
     "ieee": [r"ieee", r"institute of electrical and electronics engineers"],
@@ -63,14 +65,43 @@ def find_references_page(texts: List[str]) -> Optional[int]:
     for idx, txt in enumerate(texts):
         lines = txt.splitlines()
         for line in lines:
-            if REFERENCES_HEADER.match(line.strip()):
+            # Check if line starts with "references" (allows for line numbers, etc after it)
+            if re.match(r"^references?\s*:?", line.strip(), flags=re.IGNORECASE):
                 return idx + 1
     return None
 
 
+def is_references_at_page_start(texts: List[str], ref_page: int, max_lines_before: int = 5) -> bool:
+    """Check if references section starts at the beginning of the page.
+    
+    Args:
+        texts: List of page texts
+        ref_page: Page number where references are found (1-indexed)
+        max_lines_before: Maximum number of lines allowed before "References" header
+    
+    Returns:
+        True if references start near the beginning of the page, False otherwise
+    """
+    if ref_page < 1 or ref_page > len(texts):
+        return False
+    
+    page_text = texts[ref_page - 1]
+    lines = page_text.splitlines()
+    
+    # Find which line the References header is on
+    for line_idx, line in enumerate(lines):
+        if re.match(r"^references?\s*:?", line.strip(), flags=re.IGNORECASE):
+            # References start at or very near the beginning of the page
+            return line_idx <= max_lines_before
+    
+    return False
+
+
 def contains_figure_table_appendix(text: str) -> bool:
-    # naive check for keywords
-    return bool(re.search(r"\b(Figure|Table|Appendix)\b", text, flags=re.IGNORECASE))
+    # Check for figure/table/appendix references
+    # Pattern looks for "Figure/Table/Fig. followed by number (with optional colon)"
+    caption_pattern = r"\b(Figure|Table|Fig\.)\s+\d+\s*:?" 
+    return bool(re.search(caption_pattern, text, flags=re.IGNORECASE))
 
 
 def detect_style(text: str) -> str:
@@ -80,6 +111,40 @@ def detect_style(text: str) -> str:
             if re.search(pat, text, flags=re.IGNORECASE):
                 return style
     return "unknown"
+
+
+def check_reference_format(ref_text: str) -> str:
+    """Check if references use numeric citations ([1], [2], etc) or author citations.
+    
+    Returns:
+        "numeric" if using [1], [2], etc.
+        "author" if using [Author et al.(year)] or similar
+        "mixed" if both formats present
+        "unknown" if no citations found
+    """
+    # Look for numeric citations like [1], [2], [99], etc.
+    numeric_citations = re.findall(r"\[\d+\]", ref_text)
+    
+    # Look for author-style citations like [Author et al.(2020)] or [key(year)]
+    author_citations = re.findall(r"\[[A-Za-z].*\(\d{4}\)\]", ref_text)
+    
+    # Also check for abbreviated key style like [sou(2018)]
+    key_citations = re.findall(r"\[[a-z]+\(\d{4}\)\]", ref_text)
+    
+    has_numeric = len(numeric_citations) > 0
+    has_author = len(author_citations) > 0
+    has_key = len(key_citations) > 0
+    has_author_style = has_author or has_key
+    
+    if has_numeric and not has_author_style:
+        return "numeric"
+    elif has_author_style and not has_numeric:
+        return "author"
+    elif has_numeric and has_author_style:
+        return "mixed"
+    else:
+        return "unknown"
+
 
 
 def check_file(
@@ -120,7 +185,12 @@ def check_file(
     # Check if references start too late (implying main text exceeds limit)
     main_pages_limit = main_pages if main_pages is not None else 10  # Default to 10 for ICSE
     if ref_page is not None and ref_page > main_pages_limit + 1:
-        warnings.append(f"References start on page {ref_page}, which implies main text exceeds {main_pages_limit} pages.")
+        warnings.append(f"References must start no later than page {main_pages_limit + 1}, but found on page {ref_page}.")
+    
+    # Check if references are on the expected page but not at the beginning (main content exceeded limit)
+    if ref_page is not None and ref_page == main_pages_limit + 1:
+        if not is_references_at_page_start(texts, ref_page):
+            warnings.append(f"Main content exceeds {main_pages_limit} pages (references do not start at beginning of page {ref_page}).")
     
     # If no references found, check if total pages exceed main text limit
     if ref_page is None and num_pages > main_pages_limit:
@@ -129,9 +199,15 @@ def check_file(
     # pages after references
     after_refs = []
     if ref_page is not None:
+        # Only flag figures/tables/appendix if they appear after valid content area
+        # Use max_pages if specified, otherwise use main_pages_limit
+        figure_check_limit = max_pages if max_pages is not None else main_pages_limit
+        after_refs = []
         for pageno in range(ref_page - 1, num_pages):
-            if contains_figure_table_appendix(texts[pageno]):
-                after_refs.append(pageno + 1)
+            page_num = pageno + 1  # Convert to 1-indexed
+            # Only flag if page is beyond the figure check limit
+            if page_num > figure_check_limit and contains_figure_table_appendix(texts[pageno]):
+                after_refs.append(page_num)
         if after_refs:
             warnings.append(
                 f"Figures/tables/appendix appear on pages after references: {after_refs}."
@@ -149,6 +225,15 @@ def check_file(
                 warnings.append("Document may not conform to ACM style.")
             if style == "ieee" and detected == "acm":
                 warnings.append("Document seems to be ACM style, not IEEE.")
+            
+            # Check reference format if IEEE style is requested
+            if style == "ieee" and ref_page is not None and ref_page <= len(texts):
+                ref_content = "\n".join(texts[ref_page - 1:])
+                ref_format = check_reference_format(ref_content)
+                if ref_format == "author":
+                    warnings.append("References use author citations instead of numeric citations (required for IEEE style).")
+                elif ref_format == "mixed":
+                    warnings.append("References mix numeric and author citations (IEEE style requires numeric only).")
     else:
         if detected == "acm":
             warnings.append("Document appears to follow ACM style.")
@@ -158,8 +243,11 @@ def check_file(
     # check for email on page1
     if texts:
         page1 = texts[0]
-        if EMAIL_RE.search(page1):
-            warnings.append("Non-anonymous email detected on page 1.")
+        email_match = EMAIL_RE.search(page1)
+        if email_match:
+            found_email = email_match.group(0)
+            if found_email not in ALLOWED_EMAILS:
+                warnings.append("Non-anonymous email detected on page 1.")
 
     # suspicious wording
     fulltext = "\n".join(texts)
@@ -167,14 +255,14 @@ def check_file(
         if re.search(phrase, fulltext, flags=re.IGNORECASE):
             warnings.append(f"Suspicious wording detected: '{phrase}'.")
 
-    # metadata
-    identifying_keys = ['/Author', '/Title', '/Subject', '/Keywords']
+
+    # Only check /Author metadata
     if metadata:
-        for key in identifying_keys:
-            value = metadata.get(key)
-            if value and str(value).strip():
+        author = metadata.get('/Author')
+        if author:
+            author_str = str(author).strip()
+            if author_str and author_str.lower() not in ("author", "anonymous", "ieee"):
                 warnings.append("PDF metadata contains potentially identifying information.")
-                break
 
     return warnings
 

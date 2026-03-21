@@ -56,3 +56,43 @@ def test_min_pages_warning(tmp_path, monkeypatch):
 
     warns = checker.check_file(str(pdf_path), min_pages=3)
     assert any("less than minimum required" in w for w in warns)
+
+
+def test_reference_format_warning(tmp_path, monkeypatch):
+    """Test detection of author-style citations with IEEE style."""
+    pdf_path = tmp_path / "author_refs.pdf"
+    texts = [
+        "Title and Introduction",
+        "Some content with IEEE reference",
+        "More content here",
+        "REFERENCES",
+        "[Smith et al.(2020)] John Smith and Jane Doe. 2020. Title of Paper. In Proceedings.",
+        "[Johnson et al.(2019)] Bob Johnson. 2019. Another Paper. In Conference Proceedings.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    
+    # Check with IEEE style - should detect author citations
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert any("author citations" in w.lower() for w in warns), f"Expected author citations warning, got: {warns}"
+
+
+def test_numeric_reference_format(tmp_path, monkeypatch):
+    """Test that numeric citations don't trigger warning with IEEE style."""
+    pdf_path = tmp_path / "numeric_refs.pdf"
+    texts = [
+        "Title and Introduction with refs [1][2]",
+        "Some content here",
+        "More content",
+        "REFERENCES",
+        "[1] John Smith and Jane Doe. 2020. Title of Paper. In Proceedings.",
+        "[2] Bob Johnson. 2019. Another Paper. In Conference Proceedings.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    
+    # Check with IEEE style - should NOT warn about citations format
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("author citations" in w.lower() or "numeric" in w.lower() for w in warns), f"Unexpected citation warning for numeric refs: {warns}"
+
+
