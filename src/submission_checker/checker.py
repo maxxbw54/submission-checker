@@ -61,6 +61,117 @@ def get_metadata(pdf_path: Path) -> dict:
         return {}
 
 
+def extract_font_sizes_per_page(pdf_path: Path) -> List[Optional[float]]:
+    """Extract average font sizes for each page.
+    
+    Returns a list where each element is the average font size for that page,
+    or None if font size could not be determined for that page.
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        font_sizes = []
+        
+        for page in reader.pages:
+            try:
+                # Get all font sizes used on this page
+                page_font_sizes = []
+                
+                # Access the content stream which contains font operations
+                if "/Contents" in page:
+                    content = page["/Contents"]
+                    if content:
+                        try:
+                            # Get the raw data from the content stream
+                            from pypdf.generic import IndirectObject, ArrayObject
+                            
+                            if isinstance(content, IndirectObject):
+                                content_data = content.get_object()
+                            else:
+                                content_data = content
+                            
+                            if hasattr(content_data, 'get_data'):
+                                raw_data = content_data.get_data().decode('latin-1', errors='ignore')
+                            elif isinstance(content_data, ArrayObject):
+                                # Multiple content streams
+                                raw_data = ""
+                                for item in content_data:
+                                    if isinstance(item, IndirectObject):
+                                        obj = item.get_object()
+                                        if hasattr(obj, 'get_data'):
+                                            raw_data += obj.get_data().decode('latin-1', errors='ignore')
+                            else:
+                                raw_data = str(content_data)
+                            
+                            # Look for font size operations: Tf operator sets font and size
+                            # Format is: /FontName FontSize Tf
+                            # Extract numbers that appear before Tf operator
+                            import re
+                            tf_pattern = r'([\d.]+)\s+Tf'
+                            matches = re.findall(tf_pattern, raw_data)
+                            if matches:
+                                page_font_sizes = [float(m) for m in matches]
+                        except Exception:
+                            pass
+                
+                # Calculate average if we found any font sizes
+                if page_font_sizes:
+                    avg_size = sum(page_font_sizes) / len(page_font_sizes)
+                    font_sizes.append(avg_size)
+                else:
+                    font_sizes.append(None)
+                    
+            except Exception:
+                font_sizes.append(None)
+        
+        return font_sizes
+    except Exception:
+        return []
+
+
+def check_font_size_decrease(pdf_path: Path, main_pages_limit: int = 10) -> Optional[str]:
+    """Check if font size significantly decreases anywhere in the main content area.
+    
+    Args:
+        pdf_path: Path to the PDF file
+        main_pages_limit: Expected limit for main content pages (to know where to check)
+    
+    Returns:
+        Warning message if font size decrease detected, None otherwise
+    """
+    try:
+        font_sizes = extract_font_sizes_per_page(pdf_path)
+        
+        if not font_sizes or len(font_sizes) < 2:
+            return None
+        
+        # Filter out None values and track valid indices
+        valid_sizes = [(i, size) for i, size in enumerate(font_sizes) if size is not None]
+        
+        if len(valid_sizes) < 2:
+            return None
+        
+        # Only check the main content area (up to references or main_pages_limit)
+        # Check first 3 pages as baseline for "normal" font size
+        baseline_pages = valid_sizes[:min(3, len(valid_sizes))]
+        if not baseline_pages:
+            return None
+        
+        baseline_size = sum(size for _, size in baseline_pages) / len(baseline_pages)
+        
+        # Look for significant decreases in subsequent pages
+        remaining_pages = valid_sizes[3:main_pages_limit]
+        
+        for page_idx, page_size in remaining_pages:
+            # If font size drops by more than 10%, flag it
+            if page_size < baseline_size * 0.9:
+                decrease_pct = round((1 - page_size / baseline_size) * 100)
+                return f"Font size decreases in main content starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
+        
+        return None
+    except Exception:
+        return None
+
+
 def find_references_page(texts: List[str]) -> Optional[int]:
     for idx, txt in enumerate(texts):
         lines = txt.splitlines()
@@ -263,6 +374,12 @@ def check_file(
             author_str = str(author).strip()
             if author_str and author_str.lower() not in ("author", "anonymous", "ieee"):
                 warnings.append("PDF metadata contains potentially identifying information.")
+
+    # Check for font size decrease in main content area
+    main_pages_limit = main_pages if main_pages is not None else 10  # Default to 10 for ICSE
+    font_warning = check_font_size_decrease(path, main_pages_limit=main_pages_limit)
+    if font_warning:
+        warnings.append(font_warning)
 
     return warnings
 

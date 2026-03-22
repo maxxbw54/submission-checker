@@ -11,6 +11,7 @@ A command-line tool for academic conference submissions that automatically valid
 - **Anonymity checks** – Detect non-anonymous emails mentioned on page 1.
 - **Suspicious wording** – Identify potentially revealing phrases like "our previous paper [3]".
 - **Metadata inspection** – Inspect PDF metadata for possible author information that could reveal identity.
+- **Font size detection** – Flag PDFs where font size decreases in the main content/body area (a common technique to evade page limits).
 
 ## Options
 
@@ -64,6 +65,16 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Logic**: Extracts PDF metadata (e.g., author, title) and checks if any fields contain text.
 - **Configuration**: None (always checked).
 - **Note**: Metadata often includes identifying information like author names.
+
+### 8. Font Size Detection Check
+- **Logic**: Analyzes font sizes across all main content pages. Compares the average font size in the first 3 pages (baseline) with pages 4-10. Flags if any page has a font size that decreases by more than 10% from the baseline.
+- **Configuration**: None (automatic, always checked using `--main-pages` limit).
+- **Detection scope**: Main content area (determined by `--main-pages` parameter, default 10)
+- **Sensitivity**: 10% reduction threshold
+- **Baseline**: Average of first 3 pages
+- **Output**: Reports the exact page where decrease starts, font sizes (in points), and percentage reduction
+- **Example warning**: `Font size decreases in main content starting from page 6 (from 10.1pt to 9.0pt, 10% reduction).`
+- **Note**: This detects a common technique to fit more content by reducing font size mid-document. The check is flexible and detects font shrinking at any point in the main content, not just at a specific page.
 
 ## Installation
 
