@@ -242,4 +242,43 @@ pytest tests/test_checker.py -v -s
 
 ## Contributing
 
-We welcome contributions! If you encounter any issues or have suggestions for improvements, please raise them on our [GitHub Issues](https://github.com/maxxbw54/submission-checker/issues) page. We also encourage you to submit pull requests for bug fixes or new features.
+We welcome contributions! For any bug reports, feature requests, or suggestions for general improvements to the tool, please raise them on our [GitHub Issues](https://github.com/maxxbw54/submission-checker/issues) page.
+
+### General Contributions
+
+For bug fixes and general improvements to the tool (those that benefit all users):
+1. Raise an issue first on our [GitHub Issues](https://github.com/maxxbw54/submission-checker/issues) page to discuss the change
+2. Fork the repository and create a feature branch (e.g., `fix/email-detection`, `feature/new-check`)
+3. Submit a pull request to the `main` branch with a description of your changes and a reference to the issue
+
+### For Conference Organizers
+
+If your conference wants to use and customize this tool for your submission review process, follow these steps:
+
+1. **Create a Conference Branch**
+   - Create a new branch with the naming format: `CONFERENCENAME-YEAR`
+   - Example: `ICSE-2025`, `OSDI-2026`, `NeurIPS-2025`
+
+2. **Customize for Your Conference**
+   - Within your conference branch, you can customize the tool to match your specific requirements:
+     - Adjust page limits via configuration
+     - Add/modify citation style requirements
+     - Create custom validation checks specific to your conference
+     - Update check thresholds and parameters
+   - Make all changes within this branch without submitting pull requests to `main`
+
+3. **Benefits of This Approach**
+   - Your conference-specific customizations remain isolated and don't affect the main tool
+   - You can maintain your branch independently without conflicts with other conferences
+   - Easy to update from `main` when new general improvements are released
+   - Clear separation between core tool improvements and conference-specific configurations
+
+4. **Updating from Main**
+   - To incorporate improvements from the `main` branch into your conference branch:
+   ```bash
+   git fetch origin
+   git rebase origin/main
+   ```
+   - Resolve any conflicts specific to your conference customizations
+
+For questions or if you'd like to establish a conference-specific branch, please open an issue on our [GitHub Issues](https://github.com/maxxbw54/submission-checker/issues) page.
