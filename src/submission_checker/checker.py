@@ -486,6 +486,10 @@ def main():
         "--csv",
         help="Path to output CSV report file (for folder checks)",
     )
+    parser.add_argument(
+        "--hotcrp-csv",
+        help="Path to HotCRP CSV file for bulk-updating paper tags in HotCRP. Paper ID is extracted from the filename (last number in filename), e.g., for paper ase26-paper123.pdf the paper id is 123.",
+    )
     args = parser.parse_args()
 
     # Check that at least one of --file or --folder is provided
@@ -563,6 +567,20 @@ def main():
             
             print("\n" + "=" * 70)
             print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
+            
+        if args.hotcrp_csv:
+            # Create HotCRP CSV for bulk-updating tags in HotCRP
+            with open(args.hotcrp_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['paper', 'tag'])
+                for filename, warnings in result["results"]:
+                    paper_id = "N/A"
+                    match = re.search(r"(\d+)(?!.*\d)", filename) # Extract last number in filename as paper ID
+                    if match:
+                        paper_id = int(match.group(1))   
+                    tag = "pdf-pass" if not warnings else "pdf-warning" 
+                    writer.writerow([paper_id, tag])
+            print(f"CSV report written to {args.hotcrp_csv}")
         
         sys.exit(1 if result["failed"] > 0 else 0)
 
