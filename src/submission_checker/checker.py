@@ -198,9 +198,16 @@ def is_references_at_page_start(texts: List[str], ref_page: int, max_lines_befor
     
     page_text = texts[ref_page - 1]
     lines = page_text.splitlines()
-    
+      
     # Find which line the References header is on
     for line_idx, line in enumerate(lines):
+        # print(f"Checking line {line_idx}: '{line.strip()}'")
+        
+        # If the line only contains numbers, then it is the line numbers in the margin, 
+        # and we should ignore it when counting lines before the "References" section appears
+        if re.match(r"^\d{1,4}?\s*", line.strip(), flags=re.IGNORECASE):
+            #print("only a number in the line, skipping it")
+            max_lines_before += 1
         if re.match(r"^references?\s*:?", line.strip(), flags=re.IGNORECASE):
             # References start at or very near the beginning of the page
             return line_idx <= max_lines_before
