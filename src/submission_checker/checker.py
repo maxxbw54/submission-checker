@@ -416,14 +416,16 @@ def check_folder(
     if not pdf_files:
         return {"passed": 0, "failed": 0, "results": [], "message": "No PDF files found in folder or subfolders."}
     
+    count = 0
     for pdf_file in pdf_files:
+        count += 1
         # Get relative path for display
         try:
             rel_path = pdf_file.relative_to(folder)
         except ValueError:
             rel_path = pdf_file
         
-        print(f"Checking file: {rel_path}")
+        print(f"Checking file {count}/{len(pdf_files)}: {rel_path}")
         
         try:
             warnings = check_file(
@@ -550,11 +552,15 @@ def main():
             # Write to CSV
             with open(args.csv, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(['Filename', 'Status', 'Issues'])
+                writer.writerow(['Paper ID', 'Filename', 'Status', 'Issues'])
                 for filename, warnings in result["results"]:
                     status = "PASS" if not warnings else "FAIL"
                     issues = "; ".join(warnings) if warnings else ""
-                    writer.writerow([filename, status, issues])
+                    paper_id = "N/A"
+                    match = re.search(r"(\d+)(?!.*\d)", filename) # Extract last number in filename as paper ID
+                    if match:
+                        paper_id = int(match.group(1))    
+                    writer.writerow([paper_id, filename, status, issues])
             print(f"CSV report written to {args.csv}")
             print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
         else:
