@@ -9,7 +9,7 @@ from pypdf import PdfReader
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # Generic institutional emails that should not be flagged as anonymity issues
-ALLOWED_EMAILS = {"authors@instituitons.edu", "email@email.email"}
+ALLOWED_EMAILS = {"authors@instituitons.edu", "email@email.email", "permissions@acm.org"}
 SUSPICIOUS_PHRASES = [r"our previous work", r"our previous paper", r"in our previous work"]
 REFERENCES_HEADER = re.compile(r"^references?\s*:?\s*$", flags=re.IGNORECASE)
 STYLE_KEYWORDS = {
@@ -198,9 +198,16 @@ def is_references_at_page_start(texts: List[str], ref_page: int, max_lines_befor
     
     page_text = texts[ref_page - 1]
     lines = page_text.splitlines()
-    
+      
     # Find which line the References header is on
     for line_idx, line in enumerate(lines):
+        # print(f"Checking line {line_idx}: '{line.strip()}'")
+        
+        # If the line only contains numbers, then it is the line numbers in the margin, 
+        # and we should ignore it when counting lines before the "References" section appears
+        if re.match(r"^\d{1,4}?\s*", line.strip()):
+            # print("only a number in the line, skipping it")
+            max_lines_before += 1
         if re.match(r"^references?\s*:?", line.strip(), flags=re.IGNORECASE):
             # References start at or very near the beginning of the page
             return line_idx <= max_lines_before
@@ -416,14 +423,16 @@ def check_folder(
     if not pdf_files:
         return {"passed": 0, "failed": 0, "results": [], "message": "No PDF files found in folder or subfolders."}
     
+    count = 0
     for pdf_file in pdf_files:
+        count += 1
         # Get relative path for display
         try:
             rel_path = pdf_file.relative_to(folder)
         except ValueError:
             rel_path = pdf_file
         
-        print(f"Checking file: {rel_path}")
+        print(f"Checking file {count}/{len(pdf_files)}: {rel_path}")
         
         try:
             warnings = check_file(
@@ -450,9 +459,19 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Check academic submission PDFs for policy issues.")
-    parser.add_argument("--file", help="Path to a single PDF file")
-    parser.add_argument("--folder", help="Path to folder containing PDFs to check")
-    parser.add_argument("--max-pages", type=int, help="Maximum total pages allowed (main text + references)")
+    parser.add_argument(
+        "--file", 
+        help="Path to a single PDF file"
+    )
+    parser.add_argument(
+        "--folder", 
+        help="Path to folder containing PDFs to check"
+    )
+    parser.add_argument(
+        "--max-pages", 
+        type=int, 
+        help="Maximum total pages allowed (main text + references)"
+    )
     parser.add_argument(
         "--main-pages",
         type=int,
@@ -479,7 +498,15 @@ def main():
         "--csv",
         help="Path to output CSV report file (for folder checks)",
     )
+    parser.add_argument(
+        "--hotcrp-csv",
+        help="Path to HotCRP CSV file for bulk-updating paper tags in HotCRP. Paper ID is extracted from the filename (last number in filename), e.g., for paper ase26-paper123.pdf the paper id is 123.",
+    )
     args = parser.parse_args()
+    
+    print("Submission Checker Configuration:")
+    for arg_name, arg_value in vars(args).items():
+        print(f"- {arg_name}: {arg_value}")
 
     # Check that at least one of --file or --folder is provided
     if not args.file and not args.folder:
@@ -556,6 +583,20 @@ def main():
             
             print("\n" + "=" * 70)
             print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
+            
+        if args.hotcrp_csv:
+            # Create HotCRP CSV for bulk-updating tags in HotCRP
+            with open(args.hotcrp_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['paper', 'tag'])
+                for filename, warnings in result["results"]:
+                    paper_id = "N/A"
+                    match = re.search(r"(\d+)(?!.*\d)", filename) # Extract last number in filename as paper ID
+                    if match:
+                        paper_id = int(match.group(1))   
+                    tag = "pdf-pass" if not warnings else "pdf-warning" 
+                    writer.writerow([paper_id, tag])
+            print(f"CSV report written to {args.hotcrp_csv}")
         
         sys.exit(1 if result["failed"] > 0 else 0)
 
