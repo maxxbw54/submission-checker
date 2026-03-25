@@ -563,7 +563,7 @@ def main():
             # Write to CSV
             with open(args.csv, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(['Paper ID', 'Filename', 'Status', 'Issues'])
+                writer.writerow(['Filename', 'Status', 'Issues'])
                 for filename, warnings in result["results"]:
                     status = "PASS" if not warnings else "FAIL"
                     issues = "; ".join(warnings) if warnings else ""
