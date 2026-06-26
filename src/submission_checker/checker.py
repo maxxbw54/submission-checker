@@ -4,12 +4,19 @@ import sys
 import csv
 from pathlib import Path
 from typing import List, Tuple, Optional
+from collections import Counter
+from statistics import median
 
 from pypdf import PdfReader
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # Generic institutional emails that should not be flagged as anonymity issues
-ALLOWED_EMAILS = {"authors@instituitons.edu", "email@email.email"}
+ALLOWED_EMAILS = {
+    "authors@institutions.edu",
+    "authors@instituitons.edu",
+    "email@email.email",
+    "anonymous@example.com",
+}
 SUSPICIOUS_PHRASES = [r"our previous work", r"our previous paper", r"in our previous work"]
 REFERENCES_HEADER = re.compile(r"^references?\s*:?\s*$", flags=re.IGNORECASE)
 STYLE_KEYWORDS = {
@@ -61,20 +68,19 @@ def get_metadata(pdf_path: Path) -> dict:
         return {}
 
 
-def extract_font_sizes_per_page(pdf_path: Path) -> List[Optional[float]]:
-    """Extract average font sizes for each page.
-    
-    Returns a list where each element is the average font size for that page,
-    or None if font size could not be determined for that page.
+def extract_font_size_samples_per_page(pdf_path: Path) -> List[List[float]]:
+    """Extract raw font-size samples for each page from PDF content streams.
+
+    Returns one list per page. A page list is empty when no font sizes can be
+    extracted.
     """
     try:
         reader = PdfReader(str(pdf_path))
-        font_sizes = []
+        page_samples: List[List[float]] = []
         
         for page in reader.pages:
             try:
-                # Get all font sizes used on this page
-                page_font_sizes = []
+                page_font_sizes: List[float] = []
                 
                 # Access the content stream which contains font operations
                 if "/Contents" in page:
@@ -113,22 +119,57 @@ def extract_font_sizes_per_page(pdf_path: Path) -> List[Optional[float]]:
                         except Exception:
                             pass
                 
-                # Calculate average if we found any font sizes
-                if page_font_sizes:
-                    avg_size = sum(page_font_sizes) / len(page_font_sizes)
-                    font_sizes.append(avg_size)
-                else:
-                    font_sizes.append(None)
+                page_samples.append(page_font_sizes)
                     
             except Exception:
-                font_sizes.append(None)
+                page_samples.append([])
         
-        return font_sizes
+        return page_samples
     except Exception:
         return []
 
 
-def check_font_size_decrease(pdf_path: Path, main_pages_limit: int = 10) -> Optional[str]:
+def _estimate_body_font_size(page_font_sizes: List[float]) -> Optional[float]:
+    """Estimate the dominant body font size on one page.
+
+    We intentionally avoid a plain average because figure labels and footnotes
+    can dominate counts on some pages and cause false positives.
+    """
+    # Ignore implausible values and very tiny decorative text.
+    valid = [s for s in page_font_sizes if 5.0 <= s <= 20.0]
+    if not valid:
+        return None
+
+    # Bucket to reduce tiny encoding jitter and pick the most frequent size.
+    buckets = [round(s, 1) for s in valid]
+    counts = Counter(buckets)
+    dominant_bucket, _ = max(counts.items(), key=lambda item: (item[1], item[0]))
+
+    # Use a tight neighborhood around the dominant bucket.
+    neighborhood = [s for s in valid if abs(s - dominant_bucket) <= 0.4]
+    if len(neighborhood) >= 5:
+        return median(neighborhood)
+    return median(valid)
+
+
+def extract_font_sizes_per_page(pdf_path: Path) -> List[Optional[float]]:
+    """Extract estimated body font size for each page.
+
+    Returns one value per page or None when no size can be determined.
+    """
+    page_samples = extract_font_size_samples_per_page(pdf_path)
+    if not page_samples:
+        return []
+
+    return [_estimate_body_font_size(samples) for samples in page_samples]
+
+
+def check_font_size_decrease(
+    pdf_path: Path,
+    main_pages_limit: int = 10,
+    references_page: Optional[int] = None,
+    page_texts: Optional[List[str]] = None,
+) -> Optional[str]:
     """Check if font size significantly decreases anywhere in the main content area.
     
     Args:
@@ -139,7 +180,8 @@ def check_font_size_decrease(pdf_path: Path, main_pages_limit: int = 10) -> Opti
         Warning message if font size decrease detected, None otherwise
     """
     try:
-        font_sizes = extract_font_sizes_per_page(pdf_path)
+        page_samples = extract_font_size_samples_per_page(pdf_path)
+        font_sizes = [_estimate_body_font_size(samples) for samples in page_samples]
         
         if not font_sizes or len(font_sizes) < 2:
             return None
@@ -150,19 +192,60 @@ def check_font_size_decrease(pdf_path: Path, main_pages_limit: int = 10) -> Opti
         if len(valid_sizes) < 2:
             return None
         
-        # Only check the main content area (up to references or main_pages_limit)
-        # Check first 3 pages as baseline for "normal" font size
+        # Restrict to main-content pages only.
+        check_until_page = main_pages_limit
+        if references_page is not None and references_page > 1:
+            check_until_page = min(check_until_page, references_page - 1)
+
+        # Check first 3 pages as baseline for "normal" font size.
         baseline_pages = valid_sizes[:min(3, len(valid_sizes))]
         if not baseline_pages:
             return None
         
-        baseline_size = sum(size for _, size in baseline_pages) / len(baseline_pages)
+        baseline_size = median(size for _, size in baseline_pages)
+
+        # Some templates legitimately use two stable text-size buckets in the
+        # early pages (e.g., around 10pt and 8pt). Treat such recurring sizes
+        # as allowed so they do not trigger a false "decrease" warning later.
+        baseline_page_indices = {idx for idx, _ in baseline_pages}
+        baseline_samples: List[float] = []
+        for idx in baseline_page_indices:
+            baseline_samples.extend(s for s in page_samples[idx] if 5.0 <= s <= 20.0)
+
+        baseline_bucket_counts = Counter(round(s, 1) for s in baseline_samples)
+        baseline_allowed_sizes = {baseline_size}
+        if baseline_bucket_counts:
+            max_count = max(baseline_bucket_counts.values())
+            min_alt_count = max(12, int(max_count * 0.3))
+            for bucket_size, bucket_count in baseline_bucket_counts.items():
+                if bucket_count >= min_alt_count:
+                    baseline_allowed_sizes.add(bucket_size)
         
-        # Look for significant decreases in subsequent pages
-        remaining_pages = valid_sizes[3:main_pages_limit]
+        # Look for significant decreases in subsequent pages.
+        remaining_pages = [
+            (page_idx, page_size)
+            for page_idx, page_size in valid_sizes[3:]
+            if (page_idx + 1) <= check_until_page
+        ]
         
         for page_idx, page_size in remaining_pages:
-            # If font size drops by more than 10%, flag it
+            if page_texts is not None and page_idx < len(page_texts):
+                if not _is_body_like_page(page_texts[page_idx]):
+                    continue
+
+            # If the page still contains enough baseline-sized text, this is
+            # usually a figure/caption-heavy page, not body text shrinking.
+            current_samples = [s for s in page_samples[page_idx] if 5.0 <= s <= 20.0]
+            baseline_like_count = sum(1 for s in current_samples if abs(s - baseline_size) <= 0.5)
+            if baseline_like_count >= 8:
+                continue
+
+            # If current page aligns with an allowed baseline size bucket,
+            # consider it stable and do not flag as a decrease.
+            if any(abs(page_size - allowed) <= 0.4 for allowed in baseline_allowed_sizes):
+                continue
+
+            # If font size drops by more than 10%, flag it.
             if page_size < baseline_size * 0.9:
                 decrease_pct = round((1 - page_size / baseline_size) * 100)
                 return f"Font size decreases in main content starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
@@ -210,9 +293,28 @@ def is_references_at_page_start(texts: List[str], ref_page: int, max_lines_befor
 
 def contains_figure_table_appendix(text: str) -> bool:
     # Check for figure/table/appendix references
-    # Pattern looks for "Figure/Table/Fig. followed by number (with optional colon)"
-    caption_pattern = r"\b(Figure|Table|Fig\.)\s+\d+\s*:?" 
+    # Pattern looks for "Figure/Table/Fig." followed by arabic or roman numbering.
+    caption_pattern = r"\b(Figure|Table|Fig\.)\s+([0-9]+|[IVXLC]+)\b\s*:?"
     return bool(re.search(caption_pattern, text, flags=re.IGNORECASE))
+
+
+def _is_body_like_page(text: str) -> bool:
+    """Heuristic to identify pages dominated by prose body text."""
+    compact = " ".join((text or "").split())
+    if not compact:
+        return False
+
+    # Caption-led pages are commonly table/figure-heavy even when text length
+    # is large due OCR/extraction of dense tabular content.
+    if re.match(r"^(TABLE|FIGURE|Fig\.)\s+([0-9]+|[IVXLC]+)\b", compact, flags=re.IGNORECASE):
+        return False
+
+    # Most body pages in this corpus have substantially more prose content.
+    if len(compact) >= 3500:
+        return True
+
+    # Short pages are accepted only when no explicit figure/table marker exists.
+    return not contains_figure_table_appendix(compact)
 
 
 def detect_style(text: str) -> str:
@@ -356,7 +458,7 @@ def check_file(
         page1 = texts[0]
         email_match = EMAIL_RE.search(page1)
         if email_match:
-            found_email = email_match.group(0)
+            found_email = email_match.group(0).lower()
             if found_email not in ALLOWED_EMAILS:
                 warnings.append("Non-anonymous email detected on page 1.")
 
@@ -377,7 +479,12 @@ def check_file(
 
     # Check for font size decrease in main content area
     main_pages_limit = main_pages if main_pages is not None else 10  # Default to 10 for ICSE
-    font_warning = check_font_size_decrease(path, main_pages_limit=main_pages_limit)
+    font_warning = check_font_size_decrease(
+        path,
+        main_pages_limit=main_pages_limit,
+        references_page=ref_page,
+        page_texts=texts,
+    )
     if font_warning:
         warnings.append(font_warning)
 
