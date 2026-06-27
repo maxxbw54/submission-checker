@@ -230,6 +230,30 @@ def test_non_header_references_mention_not_treated_as_references_start(tmp_path,
     assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
 
 
+def test_references_header_with_page_number_suffix_is_detected(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "references_suffix.pdf"
+    texts = [
+        "Body text page 1",
+        "Body text page 2",
+        "Body text page 3",
+        "Body text page 4",
+        "Body text page 5",
+        "Body text page 6",
+        "Body text page 7",
+        "Body text page 8",
+        "Body text page 9",
+        "Body text page 10",
+        "Body text page 11",
+        "Conclusion text\nREFERENCES876\n[1] A. Author, \"Paper One,\" Venue, 2024.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), main_pages=10)
+    assert not any("No references section found" in w for w in warns), f"Unexpected missing-references warning: {warns}"
+    assert any("references must start no later than page 11" in w.lower() for w in warns), f"Expected late-references warning, got: {warns}"
+
+
 def test_single_hyphen_reference_continuation_not_bullet_list(tmp_path, monkeypatch):
     pdf_path = tmp_path / "single_hyphen_continuation.pdf"
     texts = [
@@ -274,6 +298,24 @@ def test_two_dash_continuation_lines_not_bullet_list_in_numeric_refs(tmp_path, m
         "[2] B. Author, \"Another Topic,\" IEEE, 2025.",
         "- May 6, 2025. IEEE, 2025, pp. 1628-1639.",
         "[3] C. Author, \"Third Topic,\" Venue, 2022.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_dash_continuations_and_large_volume_prefix_not_nonstandard(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "dash_continuations_large_volume.pdf"
+    texts = [
+        "Body text",
+        "References",
+        "[1] J. Author, \"Towards\"",
+        "- Workshops - XP 2020 Workshops, Copenhagen, Denmark, June",
+        "[2] N. Author, \"Another title,\" Venue, 2021.",
+        "11915. Springer, 2019, pp. 417-432.",
+        "[3] C. Author, \"Third title,\" Venue, 2022.",
     ]
     make_pdf(texts, pdf_path)
     monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
@@ -375,7 +417,7 @@ def test_font_decrease_not_flagged_for_short_table_page(tmp_path, monkeypatch):
         [9.96] * 200,
         [7.97] * 220,
         [9.96] * 200,
-        [7.97] * 50,
+        [9.96] * 50,
     ]
 
     monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
@@ -383,6 +425,34 @@ def test_font_decrease_not_flagged_for_short_table_page(tmp_path, monkeypatch):
 
     warns = checker.check_file(str(pdf_path), main_pages=10)
     assert not any("Font size decreases" in w for w in warns), f"Unexpected font-size warning: {warns}"
+
+
+def test_font_decrease_detected_in_references_section(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "refs_font_drop.pdf"
+    texts = [
+        "Body text " * 600,
+        "Body text " * 600,
+        "Body text " * 600,
+        "Body text " * 600,
+        "References",
+        "[1] Ref entry",
+    ]
+    make_pdf(texts, pdf_path)
+
+    page_samples = [
+        [10.0] * 200,
+        [10.0] * 200,
+        [10.0] * 200,
+        [10.0] * 200,
+        [8.0] * 200,
+        [8.0] * 120,
+    ]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
+
+    warns = checker.check_file(str(pdf_path), main_pages=10, check_reference_font_size=True)
+    assert any("Font size decreases in references" in w for w in warns), f"Expected references font-size warning, got: {warns}"
 
 
 def test_font_decrease_not_flagged_for_recurring_alternate_baseline_size(tmp_path, monkeypatch):
@@ -406,5 +476,166 @@ def test_font_decrease_not_flagged_for_recurring_alternate_baseline_size(tmp_pat
 
     warns = checker.check_file(str(pdf_path), main_pages=10)
     assert not any("Font size decreases" in w for w in warns), f"Unexpected font-size warning: {warns}"
+
+
+def test_ieee_line_spacing_detects_compressed_body_text(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "compressed_body_spacing.pdf"
+    texts = ["Body text " * 600] * 5 + ["References", "[1] Ref entry"]
+    make_pdf(texts, pdf_path)
+
+    page_lines = [
+        [
+            {"text": f"Baseline line {idx} with enough words for body detection.", "y": 700.0 - idx * 12.0, "font_size": 10.0}
+            for idx in range(8)
+        ],
+        [
+            {"text": f"Baseline line {idx} with enough words for body detection.", "y": 700.0 - idx * 12.0, "font_size": 10.0}
+            for idx in range(8)
+        ],
+        [
+            {"text": f"Baseline line {idx} with enough words for body detection.", "y": 700.0 - idx * 12.0, "font_size": 10.0}
+            for idx in range(8)
+        ],
+        [
+            {"text": f"Compressed line {idx} with enough words for body detection.", "y": 700.0 - idx * 9.0, "font_size": 10.0}
+            for idx in range(8)
+        ],
+        [
+            {"text": f"Compressed line {idx} with enough words for body detection.", "y": 700.0 - idx * 9.0, "font_size": 10.0}
+            for idx in range(8)
+        ],
+        [{"text": "References", "y": 700.0, "font_size": 10.0}],
+        [{"text": "[1] Ref entry", "y": 700.0, "font_size": 10.0}],
+    ]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_line_metrics_per_page", lambda p: page_lines)
+    monkeypatch.setattr(checker, "extract_font_sizes_per_page", lambda p: [10.0] * len(page_lines))
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: [[10.0] * 40 for _ in page_lines])
+
+    warns = checker.check_file(str(pdf_path), style="ieee", main_pages=10, check_ieee_spacing=True)
+    assert any("Line spacing appears tighter" in w for w in warns), f"Expected spacing warning, got: {warns}"
+
+
+def test_ieee_column_layout_detects_single_column_body_pages(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "single_column_ieee.pdf"
+    texts = ["Body text " * 600] * 4 + ["References", "[1] Ref entry"]
+    make_pdf(texts, pdf_path)
+
+    two_column_page = []
+    for idx in range(4):
+        two_column_page.append({
+            "text": f"Left column line {idx} with enough words for body detection in IEEE layout.",
+            "y": 700.0 - idx * 12.0,
+            "min_x": 40.0,
+            "max_x": 230.0,
+            "font_size": 10.0,
+        })
+        two_column_page.append({
+            "text": f"Right column line {idx} with enough words for body detection in IEEE layout.",
+            "y": 700.0 - idx * 12.0,
+            "min_x": 320.0,
+            "max_x": 520.0,
+            "font_size": 10.0,
+        })
+
+    single_column_page = [
+        {
+            "text": f"Single column line {idx} with enough words for body detection in IEEE layout.",
+            "y": 700.0 - idx * 12.0,
+            "min_x": 40.0,
+            "max_x": 520.0,
+            "font_size": 10.0,
+        }
+        for idx in range(8)
+    ]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_text_blocks_per_page", lambda p: [two_column_page, single_column_page, single_column_page, single_column_page, [], []])
+    monkeypatch.setattr(checker, "extract_page_widths", lambda p: [612.0] * 6)
+    monkeypatch.setattr(checker, "extract_line_metrics_per_page", lambda p: [])
+    monkeypatch.setattr(checker, "extract_font_sizes_per_page", lambda p: [10.0] * 6)
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: [[10.0] * 40 for _ in range(6)])
+
+    warns = checker.check_file(str(pdf_path), style="ieee", main_pages=10, check_ieee_spacing=True)
+    assert any("single-column" in w.lower() for w in warns), f"Expected IEEE column-layout warning, got: {warns}"
+
+
+def test_ieee_line_spacing_detects_heading_gap_compression(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "compressed_heading_gap.pdf"
+    texts = ["Body text " * 600] * 4 + ["References"]
+    make_pdf(texts, pdf_path)
+
+    baseline_page = [
+        {"text": f"Baseline line {idx} with enough words for body detection.", "y": 700.0 - idx * 12.0, "font_size": 10.0}
+        for idx in range(8)
+    ]
+    compressed_heading_page = [
+        {"text": "4 Results", "y": 700.0, "font_size": 11.5},
+        {"text": "This paragraph starts immediately after the heading with enough words to count as body text.", "y": 692.0, "font_size": 10.0},
+        {"text": "Another body line with enough words to count as prose for spacing analysis.", "y": 680.0, "font_size": 10.0},
+        {"text": "Yet another body line with enough words to keep the page prose-like for analysis.", "y": 668.0, "font_size": 10.0},
+        {"text": "A fourth body line with enough words to keep the page prose-like for analysis.", "y": 656.0, "font_size": 10.0},
+    ]
+    page_lines = [baseline_page, baseline_page, baseline_page, compressed_heading_page, [{"text": "References", "y": 700.0, "font_size": 10.0}]]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_line_metrics_per_page", lambda p: page_lines)
+    monkeypatch.setattr(checker, "extract_font_sizes_per_page", lambda p: [10.0, 10.0, 10.0, 10.0, 10.0])
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: [[10.0] * 40 for _ in page_lines])
+
+    warns = checker.check_file(str(pdf_path), style="ieee", main_pages=10, check_ieee_spacing=True)
+    assert any("compressed near a heading" in w for w in warns), f"Expected heading spacing warning, got: {warns}"
+
+
+def test_ieee_line_spacing_not_flagged_for_baseline_spacing(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "normal_spacing.pdf"
+    texts = ["Body text " * 600] * 5
+    make_pdf(texts, pdf_path)
+
+    page_lines = [
+        [
+            {"text": f"Normal line {idx} with enough words for body detection.", "y": 700.0 - idx * 12.0, "font_size": 10.0}
+            for idx in range(8)
+        ]
+        for _ in range(5)
+    ]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_line_metrics_per_page", lambda p: page_lines)
+    monkeypatch.setattr(checker, "extract_font_sizes_per_page", lambda p: [10.0] * len(page_lines))
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: [[10.0] * 40 for _ in page_lines])
+
+    warns = checker.check_file(str(pdf_path), style="ieee", main_pages=10, check_ieee_spacing=True)
+    assert not any("Line spacing appears" in w for w in warns), f"Unexpected spacing warning: {warns}"
+
+
+def test_ieee_line_spacing_does_not_treat_table_labels_as_headings(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "table_labels_not_headings.pdf"
+    texts = ["Body text " * 700] * 5
+    make_pdf(texts, pdf_path)
+
+    baseline_page = [
+        {"text": f"Baseline line {idx} with enough words for body detection.", "y": 700.0 - idx * 12.0, "font_size": 10.0}
+        for idx in range(8)
+    ]
+    table_like_page = [
+        {"text": "Instruction", "y": 700.0, "font_size": 10.0},
+        {"text": "Role description", "y": 694.0, "font_size": 8.5},
+        {"text": "Detection rules", "y": 682.0, "font_size": 8.5},
+        {"text": "Original analysis result", "y": 676.0, "font_size": 10.0},
+        {"text": "Output constraints", "y": 670.0, "font_size": 8.0},
+        {"text": "Another dense label row", "y": 664.0, "font_size": 10.0},
+        {"text": "Final short row label", "y": 658.0, "font_size": 8.5},
+    ]
+    page_lines = [baseline_page, baseline_page, baseline_page, table_like_page, baseline_page]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_line_metrics_per_page", lambda p: page_lines)
+    monkeypatch.setattr(checker, "extract_font_sizes_per_page", lambda p: [10.0] * len(page_lines))
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: [[10.0] * 40 for _ in page_lines])
+
+    warns = checker.check_file(str(pdf_path), style="ieee", main_pages=10)
+    assert not any("compressed near a heading" in w for w in warns), f"Unexpected heading spacing warning: {warns}"
 
 

@@ -3,7 +3,7 @@ import re
 import sys
 import csv
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from collections import Counter
 from statistics import median
 
@@ -152,6 +152,18 @@ def _estimate_body_font_size(page_font_sizes: List[float]) -> Optional[float]:
     return median(valid)
 
 
+def _is_references_header_line(line: str) -> bool:
+    """Match references headers even when PDF extraction appends a page number suffix."""
+    candidate = line.strip()
+    if not candidate:
+        return False
+
+    # Some extractors merge the page number into the heading, e.g. "REFERENCES876".
+    candidate = re.sub(r"\s*\d+\s*$", "", candidate)
+    candidate = re.sub(r"[\s:;,.]+$", "", candidate)
+    return bool(REFERENCES_HEADER.match(candidate))
+
+
 def extract_font_sizes_per_page(pdf_path: Path) -> List[Optional[float]]:
     """Extract estimated body font size for each page.
 
@@ -164,11 +176,391 @@ def extract_font_sizes_per_page(pdf_path: Path) -> List[Optional[float]]:
     return [_estimate_body_font_size(samples) for samples in page_samples]
 
 
+def extract_line_metrics_per_page(pdf_path: Path) -> List[List[Dict[str, Any]]]:
+    """Extract approximate per-line layout metrics from each page.
+
+    Each line entry contains the merged text, its vertical position, and a
+    representative font size. We use this to detect suspiciously compressed
+    line spacing in IEEE submissions.
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        pages: List[List[Dict[str, Any]]] = []
+
+        for page in reader.pages:
+            fragments: List[Dict[str, Any]] = []
+
+            def visitor_text(text, cm, tm, font_dict, font_size):
+                stripped = (text or "").strip()
+                if not stripped:
+                    return
+
+                try:
+                    y_pos = float(tm[5])
+                except Exception:
+                    return
+
+                try:
+                    x_pos = float(tm[4])
+                except Exception:
+                    x_pos = 0.0
+
+                try:
+                    size = float(font_size)
+                except Exception:
+                    size = 0.0
+
+                fragments.append({
+                    "text": stripped,
+                    "x": x_pos,
+                    "y": y_pos,
+                    "font_size": size,
+                })
+
+            try:
+                page.extract_text(visitor_text=visitor_text)
+            except Exception:
+                pages.append([])
+                continue
+
+            if not fragments:
+                pages.append([])
+                continue
+
+            lines_by_band: Dict[float, List[Dict[str, Any]]] = {}
+            for fragment in fragments:
+                band = round(fragment["y"] / 1.5) * 1.5
+                lines_by_band.setdefault(band, []).append(fragment)
+
+            page_lines: List[Dict[str, Any]] = []
+            for band, band_fragments in lines_by_band.items():
+                ordered = sorted(band_fragments, key=lambda item: (item["x"], item["text"]))
+                text = " ".join(fragment["text"] for fragment in ordered).strip()
+                font_sizes = [fragment["font_size"] for fragment in ordered if fragment["font_size"] > 0]
+                if not text:
+                    continue
+                page_lines.append({
+                    "text": text,
+                    "y": band,
+                    "font_size": median(font_sizes) if font_sizes else 0.0,
+                })
+
+            pages.append(sorted(page_lines, key=lambda item: item["y"], reverse=True))
+
+        return pages
+    except Exception:
+        return []
+
+
+def extract_text_blocks_per_page(pdf_path: Path) -> List[List[Dict[str, Any]]]:
+    """Extract approximate text blocks per page with x/y spans.
+
+    Blocks are built from text fragments that share a similar baseline and are
+    horizontally close enough to belong to the same visual line segment. This
+    lets us distinguish wide single-column prose from two-column layouts.
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        pages: List[List[Dict[str, Any]]] = []
+
+        for page in reader.pages:
+            fragments: List[Dict[str, Any]] = []
+
+            def visitor_text(text, cm, tm, font_dict, font_size):
+                stripped = (text or "").strip()
+                if not stripped:
+                    return
+
+                try:
+                    y_pos = float(tm[5])
+                except Exception:
+                    return
+
+                try:
+                    x_pos = float(tm[4])
+                except Exception:
+                    x_pos = 0.0
+
+                try:
+                    size = float(font_size)
+                except Exception:
+                    size = 0.0
+
+                estimated_advance = max(8.0, len(stripped) * max(size, 8.0) * 0.45)
+
+                fragments.append({
+                    "text": stripped,
+                    "x": x_pos,
+                    "end_x": x_pos + estimated_advance,
+                    "y": y_pos,
+                    "font_size": size,
+                })
+
+            try:
+                page.extract_text(visitor_text=visitor_text)
+            except Exception:
+                pages.append([])
+                continue
+
+            if not fragments:
+                pages.append([])
+                continue
+
+            lines_by_band: Dict[float, List[Dict[str, Any]]] = {}
+            for fragment in fragments:
+                band = round(fragment["y"] / 1.5) * 1.5
+                lines_by_band.setdefault(band, []).append(fragment)
+
+            page_blocks: List[Dict[str, Any]] = []
+            for band, band_fragments in lines_by_band.items():
+                ordered = sorted(band_fragments, key=lambda item: (item["x"], item["text"]))
+                clusters: List[List[Dict[str, Any]]] = []
+                current_cluster: List[Dict[str, Any]] = []
+                previous_x: Optional[float] = None
+
+                for fragment in ordered:
+                    if previous_x is not None and fragment["x"] - previous_x > 80.0 and current_cluster:
+                        clusters.append(current_cluster)
+                        current_cluster = []
+                    current_cluster.append(fragment)
+                    previous_x = fragment["x"]
+
+                if current_cluster:
+                    clusters.append(current_cluster)
+
+                for cluster in clusters:
+                    text = " ".join(fragment["text"] for fragment in cluster).strip()
+                    if not text:
+                        continue
+
+                    x_positions = [fragment["x"] for fragment in cluster]
+                    end_positions = [fragment.get("end_x", fragment["x"]) for fragment in cluster]
+                    font_sizes = [fragment["font_size"] for fragment in cluster if fragment["font_size"] > 0]
+                    page_blocks.append({
+                        "text": text,
+                        "y": band,
+                        "min_x": min(x_positions),
+                        "max_x": max(end_positions),
+                        "font_size": median(font_sizes) if font_sizes else 0.0,
+                    })
+
+            pages.append(sorted(page_blocks, key=lambda item: (item["y"], item["min_x"]), reverse=True))
+
+        return pages
+    except Exception:
+        return []
+
+
+def extract_page_widths(pdf_path: Path) -> List[float]:
+    try:
+        reader = PdfReader(str(pdf_path))
+        widths: List[float] = []
+        for page in reader.pages:
+            try:
+                widths.append(float(page.mediabox.width))
+            except Exception:
+                widths.append(0.0)
+        return widths
+    except Exception:
+        return []
+
+
+def _is_heading_line(text: str, font_size: float, body_font_size: Optional[float]) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    if re.search(r"[•,:;]", stripped):
+        return False
+
+    if re.match(r"^(references?|table|figure|fig\.|appendix)\b", stripped, flags=re.IGNORECASE):
+        return False
+
+    if len(stripped) <= 80 and re.match(
+        r"^(?:\d+(?:\.\d+)*|[IVXLCM]+|[A-Z])\.?(?:\s+[A-Z][A-Za-z0-9\-]*){1,10}$",
+        stripped,
+    ):
+        return True
+
+    if (
+        body_font_size is not None
+        and font_size >= body_font_size * 1.18
+        and len(stripped) <= 80
+        and re.match(r"^[A-Z][A-Za-z0-9\-]+(?:\s+(?:[A-Z][A-Za-z0-9\-]+|and|or|of|to|for|with|in|on)){0,9}$", stripped)
+    ):
+        return True
+
+    return False
+
+
+def _is_body_text_line(text: str) -> bool:
+    compact = " ".join(text.split())
+    if len(compact) < 25:
+        return False
+    if not re.search(r"[A-Za-z]", compact):
+        return False
+    if re.match(r"^(references?|figure|fig\.|table|appendix)\b", compact, flags=re.IGNORECASE):
+        return False
+    return True
+
+
+def check_ieee_line_spacing(
+    pdf_path: Path,
+    main_pages_limit: int = 10,
+    references_page: Optional[int] = None,
+    page_texts: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Detect suspiciously compressed line spacing in IEEE manuscripts."""
+    try:
+        line_metrics = extract_line_metrics_per_page(pdf_path)
+        font_sizes = extract_font_sizes_per_page(pdf_path)
+        if not line_metrics:
+            return None
+
+        check_until_page = main_pages_limit
+        if references_page is not None and references_page > 1:
+            check_until_page = min(check_until_page, references_page - 1)
+
+        baseline_gaps: List[float] = []
+        baseline_pages = min(3, len(line_metrics), check_until_page)
+        for page_idx in range(baseline_pages):
+            lines = line_metrics[page_idx]
+            body_font_size = font_sizes[page_idx] if page_idx < len(font_sizes) else None
+            for current, following in zip(lines, lines[1:]):
+                if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
+                    continue
+                if body_font_size is not None:
+                    if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
+                        continue
+                gap = current["y"] - following["y"]
+                if 6.0 <= gap <= 24.0:
+                    baseline_gaps.append(gap)
+
+        if len(baseline_gaps) < 4:
+            return None
+
+        baseline_gap = median(baseline_gaps)
+        compressed_pages: List[int] = []
+
+        for page_idx in range(baseline_pages, min(check_until_page, len(line_metrics))):
+            if page_texts is not None and page_idx < len(page_texts) and not _is_body_like_page(page_texts[page_idx]):
+                continue
+
+            lines = line_metrics[page_idx]
+            body_font_size = font_sizes[page_idx] if page_idx < len(font_sizes) else None
+            body_gaps: List[float] = []
+
+            for current, following in zip(lines, lines[1:]):
+                gap = current["y"] - following["y"]
+                if gap <= 0:
+                    continue
+
+                if _is_heading_line(current["text"], current["font_size"], body_font_size) and _is_body_text_line(following["text"]):
+                    if gap < baseline_gap * 0.78:
+                        return (
+                            f"Line spacing appears compressed near a heading on page {page_idx + 1} "
+                            f"(gap {gap:.1f}pt vs baseline {baseline_gap:.1f}pt)."
+                        )
+
+                if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
+                    continue
+
+                if body_font_size is not None:
+                    if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
+                        continue
+
+                if 4.0 <= gap <= 24.0:
+                    body_gaps.append(gap)
+
+            if len(body_gaps) >= 4:
+                page_gap = median(body_gaps)
+                compressed_count = sum(1 for gap in body_gaps if gap < baseline_gap * 0.84)
+                if page_gap < baseline_gap * 0.87 and compressed_count >= max(3, len(body_gaps) // 2):
+                    compressed_pages.append(page_idx + 1)
+
+        if compressed_pages:
+            pages = ", ".join(str(page) for page in compressed_pages[:3])
+            return (
+                "Line spacing appears tighter than the IEEE baseline "
+                f"on page(s) {pages} (baseline {baseline_gap:.1f}pt)."
+            )
+
+        return None
+    except Exception:
+        return None
+
+
+def check_ieee_column_layout(
+    pdf_path: Path,
+    main_pages_limit: int = 10,
+    references_page: Optional[int] = None,
+    page_texts: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Detect likely single-column body layout in IEEE manuscripts."""
+    try:
+        page_blocks = extract_text_blocks_per_page(pdf_path)
+        page_widths = extract_page_widths(pdf_path)
+        if not page_blocks or not page_widths:
+            return None
+
+        check_until_page = main_pages_limit
+        if references_page is not None and references_page > 1:
+            check_until_page = min(check_until_page, references_page - 1)
+
+        start_page = 1 if check_until_page >= 2 else 0
+        suspect_pages: List[int] = []
+
+        for page_idx in range(start_page, min(check_until_page, len(page_blocks), len(page_widths))):
+            if page_texts is not None and page_idx < len(page_texts) and not _is_body_like_page(page_texts[page_idx]):
+                continue
+
+            page_width = page_widths[page_idx]
+            if page_width <= 0:
+                continue
+
+            center = page_width / 2.0
+            gutter = max(24.0, page_width * 0.08)
+            body_blocks = [
+                block for block in page_blocks[page_idx]
+                if _is_body_text_line(block["text"])
+            ]
+            if len(body_blocks) < 6:
+                continue
+
+            spanning_blocks = [
+                block for block in body_blocks
+                if block["min_x"] < center - gutter and block["max_x"] > center + gutter
+            ]
+            left_blocks = [
+                block for block in body_blocks
+                if block["max_x"] <= center - gutter
+            ]
+            right_blocks = [
+                block for block in body_blocks
+                if block["min_x"] >= center + gutter
+            ]
+
+            if len(spanning_blocks) >= max(4, len(body_blocks) // 2) and len(right_blocks) <= max(1, len(body_blocks) // 8):
+                suspect_pages.append(page_idx + 1)
+
+        if suspect_pages:
+            pages = ", ".join(str(page) for page in suspect_pages[:3])
+            return (
+                "Body layout appears single-column instead of IEEE two-column "
+                f"on page(s) {pages}."
+            )
+
+        return None
+    except Exception:
+        return None
+
+
 def check_font_size_decrease(
     pdf_path: Path,
     main_pages_limit: int = 10,
     references_page: Optional[int] = None,
     page_texts: Optional[List[str]] = None,
+    check_references: bool = True,
 ) -> Optional[str]:
     """Check if font size significantly decreases anywhere in the main content area.
     
@@ -249,6 +641,23 @@ def check_font_size_decrease(
             if page_size < baseline_size * 0.9:
                 decrease_pct = round((1 - page_size / baseline_size) * 100)
                 return f"Font size decreases in main content starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
+
+        # Optionally check reference pages as well when the references section exists.
+        if check_references and references_page is not None and references_page <= len(font_sizes):
+            reference_pages = [
+                (page_idx, page_size)
+                for page_idx, page_size in valid_sizes
+                if (page_idx + 1) >= references_page
+            ]
+
+            for page_idx, page_size in reference_pages:
+                # If references align with baseline size buckets, treat as stable.
+                if any(abs(page_size - allowed) <= 0.4 for allowed in baseline_allowed_sizes):
+                    continue
+
+                if page_size < baseline_size * 0.9:
+                    decrease_pct = round((1 - page_size / baseline_size) * 100)
+                    return f"Font size decreases in references starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
         
         return None
     except Exception:
@@ -260,7 +669,7 @@ def find_references_page(texts: List[str]) -> Optional[int]:
         lines = txt.splitlines()
         for line in lines:
             # Strict standalone "References" header.
-            if re.match(r"^references?\s*:?\s*$", line.strip(), flags=re.IGNORECASE):
+            if _is_references_header_line(line):
                 return idx + 1
     return None
 
@@ -278,7 +687,7 @@ def extract_references_text(texts: List[str], ref_page: Optional[int]) -> str:
 
     start_idx = 0
     for i, line in enumerate(lines):
-        if re.match(r"^references?\s*:?\s*$", line.strip(), flags=re.IGNORECASE):
+        if _is_references_header_line(line):
             start_idx = i
             break
 
@@ -309,7 +718,7 @@ def is_references_at_page_start(texts: List[str], ref_page: int, max_lines_befor
     
     # Find which line the References header is on
     for line_idx, line in enumerate(lines):
-        if re.match(r"^references?\s*:?", line.strip(), flags=re.IGNORECASE):
+        if _is_references_header_line(line):
             # References start at or very near the beginning of the page
             return line_idx <= max_lines_before
     
@@ -427,13 +836,20 @@ def detect_nonstandard_reference_format(ref_text: str) -> List[str]:
     plain_number_count = 0
     bullet_count = 0
 
-    for line in lines_for_nonstandard:
+    for idx, line in enumerate(lines_for_nonstandard):
         # Expected: [number] ...
         if re.match(r"^\[\d+\]\s+\S", line):
             continue
 
         # Bullet lists.
         if re.match(r"^[*\-•·]\s+\S", line):
+            if has_bracket_numeric and line.startswith("- "):
+                prev_line = lines_for_nonstandard[idx - 1] if idx > 0 else ""
+                next_line = lines_for_nonstandard[idx + 1] if idx + 1 < len(lines_for_nonstandard) else ""
+                # In numeric references, dashed lines between [n] entries are
+                # often wrapped continuation text, not bullet-list items.
+                if re.match(r"^\[\d+\]\s+\S", prev_line) or re.match(r"^\[\d+\]\s+\S", next_line):
+                    continue
             bullet_count += 1
             continue
 
@@ -442,6 +858,9 @@ def detect_nonstandard_reference_format(ref_text: str) -> List[str]:
         if plain_number_match:
             number_prefix = int(plain_number_match.group(1))
             if 1800 <= number_prefix <= 2100:
+                continue
+            # Large prefixes are commonly volume numbers, page spans, etc.
+            if number_prefix >= 1000:
                 continue
             plain_number_count += 1
             continue
@@ -501,6 +920,8 @@ def check_file(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
+    check_ieee_spacing: bool = False,
+    check_reference_font_size: bool = False,
 ) -> List[str]:
     warnings: List[str] = []
     path = Path(file_path)
@@ -630,9 +1051,30 @@ def check_file(
         main_pages_limit=main_pages_limit,
         references_page=ref_page,
         page_texts=texts,
+        check_references=check_reference_font_size,
     )
     if font_warning:
         warnings.append(font_warning)
+
+    if style == "ieee":
+        column_warning = check_ieee_column_layout(
+            path,
+            main_pages_limit=main_pages_limit,
+            references_page=ref_page,
+            page_texts=texts,
+        )
+        if column_warning:
+            warnings.append(column_warning)
+
+        if check_ieee_spacing:
+            spacing_warning = check_ieee_line_spacing(
+                path,
+                main_pages_limit=main_pages_limit,
+                references_page=ref_page,
+                page_texts=texts,
+            )
+            if spacing_warning:
+                warnings.append(spacing_warning)
 
     return warnings
 
@@ -644,6 +1086,8 @@ def check_folder(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
+    check_ieee_spacing: bool = False,
+    check_reference_font_size: bool = False,
 ) -> dict:
     """Check all PDFs in a folder and subfolders, returning results.
     
@@ -686,6 +1130,8 @@ def check_folder(
                 style=style,
                 timeout=timeout,
                 main_pages=main_pages,
+                check_ieee_spacing=check_ieee_spacing,
+                check_reference_font_size=check_reference_font_size,
             )
         except Exception as e:
             warnings = [f"Error processing file: {str(e)[:100]}"]
@@ -716,6 +1162,16 @@ def main():
         "--style",
         choices=["acm", "ieee"],
         help="Declare expected style (acm or ieee) for additional validation",
+    )
+    parser.add_argument(
+        "--check-ieee-spacing",
+        action="store_true",
+        help="Enable the experimental IEEE line-spacing heuristic (off by default).",
+    )
+    parser.add_argument(
+        "--check-reference-font-size",
+        action="store_true",
+        help="Also check for font-size shrinking in references (off by default).",
     )
     parser.add_argument(
         "--timeout",
@@ -754,6 +1210,8 @@ def main():
             style=args.style,
             timeout=args.timeout,
             main_pages=args.main_pages,
+            check_ieee_spacing=args.check_ieee_spacing,
+            check_reference_font_size=args.check_reference_font_size,
         )
         if warnings:
             print("Warnings:")
@@ -773,6 +1231,8 @@ def main():
             style=args.style,
             timeout=args.timeout,
             main_pages=args.main_pages,
+            check_ieee_spacing=args.check_ieee_spacing,
+            check_reference_font_size=args.check_reference_font_size,
         )
         
         if "error" in result:
