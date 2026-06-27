@@ -8,6 +8,7 @@ A command-line tool for academic conference submissions that automatically valid
 - **References position** – Detect if references start after the allowed page.
 - **Content validation** – Flag occurrences of figures, tables, and appendices on pages that should contain references only.
 - **Style conformance** – Verify conformance to ACM or IEEE citation style.
+- **References format check** – Detect non-standard references styles such as bullet points, author-year entries, or plain numbering without brackets.
 - **Anonymity checks** – Detect non-anonymous emails mentioned on page 1.
 - **Suspicious wording** – Identify potentially revealing phrases like "our previous paper [3]".
 - **Metadata inspection** – Inspect PDF metadata for possible author information that could reveal identity.
@@ -56,17 +57,25 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Configuration**: None (always checked).
 - **Regex**: `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`
 
-### 6. Suspicious Wording Check
+### 6. Non-Standard References Format Check
+- **Logic**: Scans reference entries and validates expected bracketed numeric format such as `[1] Author, Title, Venue, Year`.
+- **Detects**:
+  - Bullet-point references (for example, `- Author, Title...`)
+  - Plain numbering without brackets (for example, `1. Author, Title...`)
+  - Author-year style entries (for example, `Smith et al. (2020) ...`)
+- **Output**: Emits a warning including detected non-standard format categories.
+
+### 7. Suspicious Wording Check
 - **Logic**: Searches the entire document for predefined phrases (case-insensitive).
 - **Configuration**: Hardcoded phrases: "our previous paper", "in our previous work".
 - **Note**: Warns for each matching phrase found.
 
-### 7. Metadata Check
+### 8. Metadata Check
 - **Logic**: Extracts PDF metadata (e.g., author, title) and checks if any fields contain text.
 - **Configuration**: None (always checked).
 - **Note**: Metadata often includes identifying information like author names.
 
-### 8. Font Size Detection Check
+### 9. Font Size Detection Check
 - **Logic**: Analyzes font sizes across all main content pages. Compares the average font size in the first 3 pages (baseline) with pages 4-10. Flags if any page has a font size that decreases by more than 10% from the baseline.
 - **Configuration**: None (automatic, always checked using `--main-pages` limit).
 - **Detection scope**: Main content area (determined by `--main-pages` parameter, default 10)

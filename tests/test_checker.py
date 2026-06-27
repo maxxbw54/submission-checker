@@ -94,6 +94,192 @@ def test_numeric_reference_format(tmp_path, monkeypatch):
     # Check with IEEE style - should NOT warn about citations format
     warns = checker.check_file(str(pdf_path), style="ieee")
     assert not any("author citations" in w.lower() or "numeric" in w.lower() for w in warns), f"Unexpected citation warning for numeric refs: {warns}"
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard format warning: {warns}"
+
+
+def test_nonstandard_reference_bullet_points(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "bullet_refs.pdf"
+    texts = [
+        "Intro text",
+        "REFERENCES",
+        "- John Smith, Great Paper, ICSE, 2024",
+        "* Jane Doe, Another Paper, FSE, 2023",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path))
+    assert any("Non-standard references format detected" in w and "bullet points" in w for w in warns), f"Expected bullet-points warning, got: {warns}"
+
+
+def test_nonstandard_reference_plain_numbering(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "plain_number_refs.pdf"
+    texts = [
+        "Intro text",
+        "References",
+        "1. John Smith, Great Paper, ICSE, 2024",
+        "2) Jane Doe, Another Paper, FSE, 2023",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path))
+    assert any(
+        "Non-standard references format detected" in w
+        and "plain numbering without brackets" in w
+        for w in warns
+    ), f"Expected plain-numbering warning, got: {warns}"
+
+
+def test_nonstandard_reference_author_year(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "author_year_refs.pdf"
+    texts = [
+        "Intro text",
+        "References",
+        "Smith et al. (2020) Great Paper. ICSE.",
+        "Johnson (2019) Another Paper. FSE.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path))
+    assert any("Non-standard references format detected" in w and "author-year citations" in w for w in warns), f"Expected author-year warning, got: {warns}"
+
+
+def test_reference_continuation_lines_not_misclassified(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "continuation_lines.pdf"
+    texts = [
+        "Intro text",
+        "References",
+        "[1] A. Author, \"Paper Title,\" Venue, 2024.",
+        "[Online]. Available: https://example.com/path/2024/",
+        "30. [Online]. Available: https://example.com/reference/linewrap",
+        "[2] B. Author, \"Another Title,\" Venue, 2023.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+    assert not any("mix numeric and author citations" in w.lower() for w in warns), f"Unexpected mixed-format warning: {warns}"
+
+
+def test_reference_year_prefixed_continuation_not_plain_numbering(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "year_prefixed_continuation.pdf"
+    texts = [
+        "Intro text",
+        "References",
+        "[1] A. Author, \"Challenge title,\" Venue,",
+        "2025: Satellite configuration, challenge description",
+        "[2] B. Author, \"Another paper,\" Venue, 2024.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_single_stray_plain_number_fragment_not_flagged(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "stray_plain_number_fragment.pdf"
+    texts = [
+        "Intro text",
+        "References",
+        "[1] A. Author, \"A Study of Something,\" in Proceedings of the",
+        "1: Long Papers), M. Liakata, V. P. Moreira, J. Zhang, and",
+        "[2] B. Author, \"Another Study,\" Venue, 2024.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_numbered_list_before_references_header_not_counted(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "pre_header_numbered_list.pdf"
+    texts = [
+        "Body page",
+        "Some content",
+        "2) Result: Figure 7 shows the results",
+        "3) Answer to RQ: additional discussion",
+        "References",
+        "[1] A. Author, \"Paper One,\" Venue, 2024.",
+        "[2] B. Author, \"Paper Two,\" Venue, 2023.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_non_header_references_mention_not_treated_as_references_start(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "references_mention_not_header.pdf"
+    texts = [
+        "References to prior work are discussed in this section.",
+        "More body text",
+        "References",
+        "[1] A. Author, \"Paper One,\" Venue, 2024.",
+        "[2] B. Author, \"Paper Two,\" Venue, 2023.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_single_hyphen_reference_continuation_not_bullet_list(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "single_hyphen_continuation.pdf"
+    texts = [
+        "Body text",
+        "References",
+        "[1] A. Author, \"Security and Privacy",
+        "- A Review,\" Venue, 2018.",
+        "[2] B. Author, \"Another paper,\" Venue, 2024.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_pre_reference_numbered_lists_not_counted_when_numeric_refs_exist(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "pre_reference_numbered_lists.pdf"
+    texts = [
+        "Body text",
+        "References",
+        "1) External environment graph: description",
+        "2) Repository dependency graph: description",
+        "[1] A. Author, \"Primary Reference,\" Venue, 2024.",
+        "[2] B. Author, \"Another Reference,\" Venue, 2023.",
+        "1: Long Papers), 2025, pp. 100-110.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
+
+
+def test_two_dash_continuation_lines_not_bullet_list_in_numeric_refs(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "dash_continuations_numeric_refs.pdf"
+    texts = [
+        "Body text",
+        "References",
+        "[1] A. Author, \"A Topic,\" in Proceedings of the International Conference",
+        "- Software Engineering for AI, CAIN 2024, Lisbon, Portugal,",
+        "[2] B. Author, \"Another Topic,\" IEEE, 2025.",
+        "- May 6, 2025. IEEE, 2025, pp. 1628-1639.",
+        "[3] C. Author, \"Third Topic,\" Venue, 2022.",
+    ]
+    make_pdf(texts, pdf_path)
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+
+    warns = checker.check_file(str(pdf_path), style="ieee")
+    assert not any("non-standard references format" in w.lower() for w in warns), f"Unexpected non-standard warning: {warns}"
 
 
 def test_our_previous_work_detection(tmp_path, monkeypatch):

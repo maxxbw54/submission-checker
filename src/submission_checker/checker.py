@@ -259,10 +259,35 @@ def find_references_page(texts: List[str]) -> Optional[int]:
     for idx, txt in enumerate(texts):
         lines = txt.splitlines()
         for line in lines:
-            # Check if line starts with "references" (allows for line numbers, etc after it)
-            if re.match(r"^references?\s*:?", line.strip(), flags=re.IGNORECASE):
+            # Strict standalone "References" header.
+            if re.match(r"^references?\s*:?\s*$", line.strip(), flags=re.IGNORECASE):
                 return idx + 1
     return None
+
+
+def extract_references_text(texts: List[str], ref_page: Optional[int]) -> str:
+    """Return text from the References header onward.
+
+    This avoids pulling pre-header body text when references start mid-page.
+    """
+    if ref_page is None or ref_page < 1 or ref_page > len(texts):
+        return ""
+
+    first_ref_page_text = texts[ref_page - 1]
+    lines = first_ref_page_text.splitlines()
+
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if re.match(r"^references?\s*:?\s*$", line.strip(), flags=re.IGNORECASE):
+            start_idx = i
+            break
+
+    sliced_first_page = "\n".join(lines[start_idx:])
+    remaining_pages = "\n".join(texts[ref_page:])
+
+    if remaining_pages:
+        return f"{sliced_first_page}\n{remaining_pages}"
+    return sliced_first_page
 
 
 def is_references_at_page_start(texts: List[str], ref_page: int, max_lines_before: int = 5) -> bool:
@@ -326,6 +351,120 @@ def detect_style(text: str) -> str:
     return "unknown"
 
 
+def _reference_entry_lines(ref_text: str) -> List[str]:
+    """Extract likely reference-entry start lines from the references section."""
+    lines: List[str] = []
+    for raw_line in ref_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        # Skip section headers and continuation lines when indentation is present.
+        if REFERENCES_HEADER.match(stripped):
+            continue
+        if raw_line[:1].isspace():
+            continue
+
+        # Numeric IEEE-style entries: [1] ...
+        if re.match(r"^\[\d+\]\s+\S", stripped):
+            lines.append(stripped)
+            continue
+
+        # Bulleted list entries.
+        if re.match(r"^[*\-•·]\s+\S", stripped):
+            lines.append(stripped)
+            continue
+
+        # Numbered entries without brackets: 1. ..., 1) ..., 1: ..., 1 ...
+        plain_number_match = re.match(r"^(\d+)(?:[\).:]|\s)\s+(.+)$", stripped)
+        if plain_number_match:
+            number_prefix = int(plain_number_match.group(1))
+            remainder = plain_number_match.group(2).strip()
+            # Ignore year-like prefixes from wrapped continuation lines.
+            if 1800 <= number_prefix <= 2100:
+                continue
+            # Ignore common continuation fragments, e.g., "30. [Online] ...".
+            if not re.match(r"^\[(online|accessed)\]", remainder, flags=re.IGNORECASE):
+                lines.append(stripped)
+            continue
+
+        # Author-year entry styles.
+        if re.match(r"^\[[A-Za-z][^\]]*\(\d{4}\)[^\]]*\]\s+\S", stripped):
+            lines.append(stripped)
+            continue
+        if re.match(r"^[A-Z][A-Za-z'`\-]+(?:\s+et\s+al\.)?\s*\(\d{4}\)\s+\S", stripped):
+            lines.append(stripped)
+            continue
+
+    return lines
+
+
+def detect_nonstandard_reference_format(ref_text: str) -> List[str]:
+    """Return detected non-standard reference entry styles.
+
+    Non-standard means entries are not in bracketed numeric style, e.g.:
+    "[1] Author, Title, Venue, Year".
+    """
+    entry_lines = _reference_entry_lines(ref_text)
+    if not entry_lines:
+        return []
+
+    detected: List[str] = []
+    first_bracket_numeric_idx = next(
+        (i for i, line in enumerate(entry_lines) if re.match(r"^\[\d+\]\s+\S", line)),
+        None,
+    )
+    has_bracket_numeric = first_bracket_numeric_idx is not None
+
+    # If numeric-bracket references exist, treat lines before the first [n]
+    # as likely non-reference body artifacts (e.g., numbered lists, bullets).
+    lines_for_nonstandard = (
+        entry_lines[first_bracket_numeric_idx:]
+        if first_bracket_numeric_idx is not None
+        else entry_lines
+    )
+
+    plain_number_count = 0
+    bullet_count = 0
+
+    for line in lines_for_nonstandard:
+        # Expected: [number] ...
+        if re.match(r"^\[\d+\]\s+\S", line):
+            continue
+
+        # Bullet lists.
+        if re.match(r"^[*\-•·]\s+\S", line):
+            bullet_count += 1
+            continue
+
+        # Numbering without brackets: "1.", "1)", "1:" or bare "1 "
+        plain_number_match = re.match(r"^(\d+)(?:[\).:]|\s)\s+\S", line)
+        if plain_number_match:
+            number_prefix = int(plain_number_match.group(1))
+            if 1800 <= number_prefix <= 2100:
+                continue
+            plain_number_count += 1
+            continue
+
+        # Author-year and key-year styles.
+        if re.match(r"^\[[A-Za-z][^\]]*\(\d{4}\)[^\]]*\]\s+\S", line) or re.match(r"^[A-Z][A-Za-z'`\-]+(?:\s+et\s+al\.)?\s*\(\d{4}\)\s+\S", line):
+            if "author-year citations" not in detected:
+                detected.append("author-year citations")
+            continue
+
+    # A single plain-number-looking line inside otherwise numeric-bracketed
+    # references is often a wrapped continuation fragment (false positive).
+    if (has_bracket_numeric and bullet_count >= 3) or (not has_bracket_numeric and bullet_count >= 1):
+        if "bullet points" not in detected:
+            detected.append("bullet points")
+
+    if plain_number_count >= 2 or (plain_number_count == 1 and not has_bracket_numeric):
+        if "plain numbering without brackets" not in detected:
+            detected.append("plain numbering without brackets")
+
+    return detected
+
+
 def check_reference_format(ref_text: str) -> str:
     """Check if references use numeric citations ([1], [2], etc) or author citations.
     
@@ -335,19 +474,14 @@ def check_reference_format(ref_text: str) -> str:
         "mixed" if both formats present
         "unknown" if no citations found
     """
-    # Look for numeric citations like [1], [2], [99], etc.
-    numeric_citations = re.findall(r"\[\d+\]", ref_text)
-    
-    # Look for author-style citations like [Author et al.(2020)] or [key(year)]
-    author_citations = re.findall(r"\[[A-Za-z].*\(\d{4}\)\]", ref_text)
-    
-    # Also check for abbreviated key style like [sou(2018)]
-    key_citations = re.findall(r"\[[a-z]+\(\d{4}\)\]", ref_text)
-    
-    has_numeric = len(numeric_citations) > 0
-    has_author = len(author_citations) > 0
-    has_key = len(key_citations) > 0
-    has_author_style = has_author or has_key
+    entry_lines = _reference_entry_lines(ref_text)
+
+    has_numeric = any(re.match(r"^\[\d+\]\s+\S", line) for line in entry_lines)
+    has_author_style = any(
+        re.match(r"^\[[A-Za-z][^\]]*\(\d{4}\)[^\]]*\]\s+\S", line)
+        or re.match(r"^[A-Z][A-Za-z'`\-]+(?:\s+et\s+al\.)?\s*\(\d{4}\)\s+\S", line)
+        for line in entry_lines
+    )
     
     if has_numeric and not has_author_style:
         return "numeric"
@@ -429,6 +563,18 @@ def check_file(
     # style detection
     combined = "\n".join(texts[:2])
     detected = detect_style(combined)
+
+    # Detect non-standard references format regardless of style requirement.
+    if ref_page is not None and ref_page <= len(texts):
+        ref_content = extract_references_text(texts, ref_page)
+        nonstandard_formats = detect_nonstandard_reference_format(ref_content)
+        if nonstandard_formats:
+            details = ", ".join(nonstandard_formats)
+            warnings.append(
+                "Non-standard references format detected "
+                f"({details}). Expected format like '[1] Author, Title, Venue, Year'."
+            )
+
     if style:
         style = style.lower()
         if style not in ("acm", "ieee"):
@@ -441,7 +587,7 @@ def check_file(
             
             # Check reference format if IEEE style is requested
             if style == "ieee" and ref_page is not None and ref_page <= len(texts):
-                ref_content = "\n".join(texts[ref_page - 1:])
+                ref_content = extract_references_text(texts, ref_page)
                 ref_format = check_reference_format(ref_content)
                 if ref_format == "author":
                     warnings.append("References use author citations instead of numeric citations (required for IEEE style).")
