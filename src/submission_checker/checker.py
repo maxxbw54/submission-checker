@@ -210,9 +210,12 @@ def extract_line_metrics_per_page(pdf_path: Path) -> List[List[Dict[str, Any]]]:
                 except Exception:
                     size = 0.0
 
+                estimated_advance = max(8.0, len(stripped) * max(size, 8.0) * 0.45)
+
                 fragments.append({
                     "text": stripped,
                     "x": x_pos,
+                    "end_x": x_pos + estimated_advance,
                     "y": y_pos,
                     "font_size": size,
                 })
@@ -237,12 +240,16 @@ def extract_line_metrics_per_page(pdf_path: Path) -> List[List[Dict[str, Any]]]:
                 ordered = sorted(band_fragments, key=lambda item: (item["x"], item["text"]))
                 text = " ".join(fragment["text"] for fragment in ordered).strip()
                 font_sizes = [fragment["font_size"] for fragment in ordered if fragment["font_size"] > 0]
+                x_positions = [fragment["x"] for fragment in ordered]
+                end_positions = [fragment.get("end_x", fragment["x"]) for fragment in ordered]
                 if not text:
                     continue
                 page_lines.append({
                     "text": text,
                     "y": band,
                     "font_size": median(font_sizes) if font_sizes else 0.0,
+                    "min_x": min(x_positions) if x_positions else 0.0,
+                    "max_x": max(end_positions) if end_positions else 0.0,
                 })
 
             pages.append(sorted(page_lines, key=lambda item: item["y"], reverse=True))
@@ -411,9 +418,53 @@ def check_ieee_line_spacing(
     page_texts: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Detect suspiciously compressed line spacing in IEEE manuscripts."""
+
+    def _split_lines_for_spacing(
+        lines: List[Dict[str, Any]],
+        page_width: float,
+    ) -> List[List[Dict[str, Any]]]:
+        if not lines:
+            return []
+
+        if page_width <= 0:
+            return [sorted(lines, key=lambda item: item["y"], reverse=True)]
+
+        has_geometry = all("min_x" in line and "max_x" in line for line in lines)
+        if not has_geometry:
+            return [sorted(lines, key=lambda item: item["y"], reverse=True)]
+
+        center = page_width / 2.0
+        gutter = 24.0
+
+        left: List[Dict[str, Any]] = []
+        right: List[Dict[str, Any]] = []
+        spanning: List[Dict[str, Any]] = []
+
+        for line in lines:
+            min_x = float(line.get("min_x", 0.0))
+            max_x = float(line.get("max_x", min_x))
+            if max_x <= center - gutter:
+                left.append(line)
+            elif min_x >= center + gutter:
+                right.append(line)
+            else:
+                spanning.append(line)
+
+        # Treat sparse pages as two-column as long as both columns are represented.
+        if len(left) >= 2 and len(right) >= 2:
+            groups: List[List[Dict[str, Any]]] = []
+            if len(left) >= 2:
+                groups.append(sorted(left, key=lambda item: item["y"], reverse=True))
+            if len(right) >= 2:
+                groups.append(sorted(right, key=lambda item: item["y"], reverse=True))
+            return groups
+
+        return [sorted(lines, key=lambda item: item["y"], reverse=True)]
+
     try:
         line_metrics = extract_line_metrics_per_page(pdf_path)
         font_sizes = extract_font_sizes_per_page(pdf_path)
+        page_widths = extract_page_widths(pdf_path)
         if not line_metrics:
             return None
 
@@ -426,15 +477,17 @@ def check_ieee_line_spacing(
         for page_idx in range(baseline_pages):
             lines = line_metrics[page_idx]
             body_font_size = font_sizes[page_idx] if page_idx < len(font_sizes) else None
-            for current, following in zip(lines, lines[1:]):
-                if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
-                    continue
-                if body_font_size is not None:
-                    if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
+            page_width = page_widths[page_idx] if page_idx < len(page_widths) else 0.0
+            for group in _split_lines_for_spacing(lines, page_width):
+                for current, following in zip(group, group[1:]):
+                    if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
                         continue
-                gap = current["y"] - following["y"]
-                if 6.0 <= gap <= 24.0:
-                    baseline_gaps.append(gap)
+                    if body_font_size is not None:
+                        if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
+                            continue
+                    gap = current["y"] - following["y"]
+                    if 6.0 <= gap <= 24.0:
+                        baseline_gaps.append(gap)
 
         if len(baseline_gaps) < 4:
             return None
@@ -449,28 +502,30 @@ def check_ieee_line_spacing(
             lines = line_metrics[page_idx]
             body_font_size = font_sizes[page_idx] if page_idx < len(font_sizes) else None
             body_gaps: List[float] = []
+            page_width = page_widths[page_idx] if page_idx < len(page_widths) else 0.0
 
-            for current, following in zip(lines, lines[1:]):
-                gap = current["y"] - following["y"]
-                if gap <= 0:
-                    continue
-
-                if _is_heading_line(current["text"], current["font_size"], body_font_size) and _is_body_text_line(following["text"]):
-                    if gap < baseline_gap * 0.78:
-                        return (
-                            f"Line spacing appears compressed near a heading on page {page_idx + 1} "
-                            f"(gap {gap:.1f}pt vs baseline {baseline_gap:.1f}pt)."
-                        )
-
-                if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
-                    continue
-
-                if body_font_size is not None:
-                    if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
+            for group in _split_lines_for_spacing(lines, page_width):
+                for current, following in zip(group, group[1:]):
+                    gap = current["y"] - following["y"]
+                    if gap <= 0:
                         continue
 
-                if 4.0 <= gap <= 24.0:
-                    body_gaps.append(gap)
+                    if _is_heading_line(current["text"], current["font_size"], body_font_size) and _is_body_text_line(following["text"]):
+                        if gap < baseline_gap * 0.78:
+                            return (
+                                f"Line spacing appears compressed near a heading on page {page_idx + 1} "
+                                f"(gap {gap:.1f}pt vs baseline {baseline_gap:.1f}pt)."
+                            )
+
+                    if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
+                        continue
+
+                    if body_font_size is not None:
+                        if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
+                            continue
+
+                    if 4.0 <= gap <= 24.0:
+                        body_gaps.append(gap)
 
             if len(body_gaps) >= 4:
                 page_gap = median(body_gaps)

@@ -639,3 +639,78 @@ def test_ieee_line_spacing_does_not_treat_table_labels_as_headings(tmp_path, mon
     assert not any("compressed near a heading" in w for w in warns), f"Unexpected heading spacing warning: {warns}"
 
 
+def test_ieee_line_spacing_checks_within_column_not_across_columns(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "cross_column_heading_gap.pdf"
+    texts = ["Body text " * 700] * 5
+    make_pdf(texts, pdf_path)
+
+    def two_column_page(prefix: str, step: float) -> list:
+        lines = []
+        for idx in range(6):
+            y = 700.0 - idx * step
+            lines.append({
+                "text": f"{prefix} left line {idx} with enough words for body detection in spacing analysis.",
+                "y": y,
+                "font_size": 10.0,
+                "min_x": 40.0,
+                "max_x": 250.0,
+            })
+            lines.append({
+                "text": f"{prefix} right line {idx} with enough words for body detection in spacing analysis.",
+                "y": y,
+                "font_size": 10.0,
+                "min_x": 330.0,
+                "max_x": 540.0,
+            })
+        return sorted(lines, key=lambda item: item["y"], reverse=True)
+
+    baseline_page = two_column_page("Baseline", 12.0)
+    cross_column_gap_page = [
+        {
+            "text": "4 Results",
+            "y": 700.0,
+            "font_size": 11.5,
+            "min_x": 40.0,
+            "max_x": 250.0,
+        },
+        {
+            "text": "Right column body line with enough words for spacing analysis and realistic prose content.",
+            "y": 694.0,
+            "font_size": 10.0,
+            "min_x": 330.0,
+            "max_x": 540.0,
+        },
+        {
+            "text": "Left column body line with enough words for spacing analysis and realistic prose content.",
+            "y": 688.0,
+            "font_size": 10.0,
+            "min_x": 40.0,
+            "max_x": 250.0,
+        },
+        {
+            "text": "Right column second body line with enough words for spacing analysis and realistic prose content.",
+            "y": 682.0,
+            "font_size": 10.0,
+            "min_x": 330.0,
+            "max_x": 540.0,
+        },
+        {
+            "text": "Left column second body line with enough words for spacing analysis and realistic prose content.",
+            "y": 676.0,
+            "font_size": 10.0,
+            "min_x": 40.0,
+            "max_x": 250.0,
+        },
+    ]
+    page_lines = [baseline_page, baseline_page, baseline_page, cross_column_gap_page, baseline_page]
+
+    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
+    monkeypatch.setattr(checker, "extract_line_metrics_per_page", lambda p: page_lines)
+    monkeypatch.setattr(checker, "extract_page_widths", lambda p: [612.0] * len(page_lines))
+    monkeypatch.setattr(checker, "extract_font_sizes_per_page", lambda p: [10.0] * len(page_lines))
+    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: [[10.0] * 40 for _ in page_lines])
+
+    warns = checker.check_file(str(pdf_path), style="ieee", main_pages=10, check_ieee_spacing=True)
+    assert not any("compressed near a heading" in w for w in warns), f"Unexpected cross-column heading warning: {warns}"
+
+
