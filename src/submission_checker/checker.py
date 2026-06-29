@@ -434,7 +434,7 @@ def check_ieee_line_spacing(
             return [sorted(lines, key=lambda item: item["y"], reverse=True)]
 
         center = page_width / 2.0
-        gutter = 24.0
+        gutter = 15.0
 
         left: List[Dict[str, Any]] = []
         right: List[Dict[str, Any]] = []
@@ -494,6 +494,7 @@ def check_ieee_line_spacing(
 
         baseline_gap = median(baseline_gaps)
         compressed_pages: List[int] = []
+        heading_spacing_warnings: List[str] = []
 
         for page_idx in range(baseline_pages, min(check_until_page, len(line_metrics))):
             if page_texts is not None and page_idx < len(page_texts) and not _is_body_like_page(page_texts[page_idx]):
@@ -512,7 +513,7 @@ def check_ieee_line_spacing(
 
                     if _is_heading_line(current["text"], current["font_size"], body_font_size) and _is_body_text_line(following["text"]):
                         if gap < baseline_gap * 0.78:
-                            return (
+                            heading_spacing_warnings.append(
                                 f"Line spacing appears compressed near a heading on page {page_idx + 1} "
                                 f"(gap {gap:.1f}pt vs baseline {baseline_gap:.1f}pt)."
                             )
@@ -533,12 +534,21 @@ def check_ieee_line_spacing(
                 if page_gap < baseline_gap * 0.87 and compressed_count >= max(3, len(body_gaps) // 2):
                     compressed_pages.append(page_idx + 1)
 
+        all_warnings: List[str] = []
+        
+        # Add heading spacing warnings
+        all_warnings.extend(heading_spacing_warnings)
+        
+        # Add compressed pages warning
         if compressed_pages:
             pages = ", ".join(str(page) for page in compressed_pages[:3])
-            return (
+            all_warnings.append(
                 "Line spacing appears tighter than the IEEE baseline "
                 f"on page(s) {pages} (baseline {baseline_gap:.1f}pt)."
             )
+
+        if all_warnings:
+            return " ".join(all_warnings)
 
         return None
     except Exception:
