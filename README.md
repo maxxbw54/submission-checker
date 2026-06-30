@@ -8,10 +8,12 @@ A command-line tool for academic conference submissions that automatically valid
 - **References position** – Detect if references start after the allowed page.
 - **Content validation** – Flag occurrences of figures, tables, and appendices on pages that should contain references only.
 - **Style conformance** – Verify conformance to ACM or IEEE citation style.
+- **References format check** – Detect non-standard references styles such as bullet points, author-year entries, or plain numbering without brackets.
 - **Anonymity checks** – Detect non-anonymous emails mentioned on page 1.
 - **Suspicious wording** – Identify potentially revealing phrases like "our previous paper [3]".
 - **Metadata inspection** – Inspect PDF metadata for possible author information that could reveal identity.
-- **Font size detection** – Flag PDFs where font size decreases in the main content/body area (a common technique to evade page limits).
+- **Font size detection** – Flag PDFs where font size decreases in the main content/body area; optional extra check for reference-section shrink.
+- **IEEE spacing check** – Optional heuristic to flag IEEE submissions where line spacing appears compressed, including unusually tight spacing after section/subsection headings.
 
 ## Options
 
@@ -21,6 +23,8 @@ A command-line tool for academic conference submissions that automatically valid
 - `--min-pages <int>`: Minimum total pages required (main text + references)
 - `--main-pages <int>`: Maximum pages for main text (default: 10)
 - `--style <acm|ieee>`: Expected citation style for validation
+- `--check-ieee-spacing`: Enable the experimental IEEE line-spacing heuristic (off by default)
+- `--check-reference-font-size`: Also check for font-size shrinking in references (off by default)
 - `--timeout <int>`: Maximum seconds for PDF text extraction (default: 10)
 - `--csv <path>`: Output CSV report file (requires `--folder`)
 
@@ -56,25 +60,43 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Configuration**: None (always checked).
 - **Regex**: `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`
 
-### 6. Suspicious Wording Check
+### 6. Non-Standard References Format Check
+- **Logic**: Scans reference entries and validates expected bracketed numeric format such as `[1] Author, Title, Venue, Year`.
+- **Detects**:
+  - Bullet-point references (for example, `- Author, Title...`)
+  - Plain numbering without brackets (for example, `1. Author, Title...`)
+  - Author-year style entries (for example, `Smith et al. (2020) ...`)
+- **Output**: Emits a warning including detected non-standard format categories.
+
+### 7. Suspicious Wording Check
 - **Logic**: Searches the entire document for predefined phrases (case-insensitive).
 - **Configuration**: Hardcoded phrases: "our previous paper", "in our previous work".
 - **Note**: Warns for each matching phrase found.
 
-### 7. Metadata Check
+### 8. Metadata Check
 - **Logic**: Extracts PDF metadata (e.g., author, title) and checks if any fields contain text.
 - **Configuration**: None (always checked).
 - **Note**: Metadata often includes identifying information like author names.
 
-### 8. Font Size Detection Check
-- **Logic**: Analyzes font sizes across all main content pages. Compares the average font size in the first 3 pages (baseline) with pages 4-10. Flags if any page has a font size that decreases by more than 10% from the baseline.
-- **Configuration**: None (automatic, always checked using `--main-pages` limit).
-- **Detection scope**: Main content area (determined by `--main-pages` parameter, default 10)
+### 9. Font Size Detection Check
+- **Logic**: Analyzes font sizes across the paper using the first 3 pages as baseline. It checks both the main content area and the references section. Flags if any checked page has a font size that decreases by more than 10% from the baseline.
+- **Configuration**: Main-content check is automatic; reference-section check requires `--check-reference-font-size`.
+- **Detection scope**: Main content area (determined by `--main-pages` parameter, default 10). References pages are checked only when `--check-reference-font-size` is enabled.
 - **Sensitivity**: 10% reduction threshold
 - **Baseline**: Average of first 3 pages
 - **Output**: Reports the exact page where decrease starts, font sizes (in points), and percentage reduction
 - **Example warning**: `Font size decreases in main content starting from page 6 (from 10.1pt to 9.0pt, 10% reduction).`
 - **Note**: This detects a common technique to fit more content by reducing font size mid-document. The check is flexible and detects font shrinking at any point in the main content, not just at a specific page.
+
+### 10. IEEE Line Spacing Check
+- **Logic**: Uses PDF text positions to estimate vertical gaps between adjacent lines, builds a baseline from the early body pages, and flags later pages when prose lines are consistently tighter than that baseline.
+- **Configuration**: Active only when both `--style ieee` and `--check-ieee-spacing` are used.
+- **Detects**:
+  - Compressed spacing between body-text lines
+  - Compressed spacing between a section or subsection heading and the first paragraph line
+- **Detection scope**: Main-content pages only; pages dominated by figures or tables are skipped when possible.
+- **Output**: Emits a warning with the page number and whether the issue looks like general line compression or a heading-to-paragraph spacing issue.
+- **Note**: This is an experimental supporting heuristic intended to catch layout tightening that may violate IEEE spacing expectations. It depends on extractable PDF layout information and may miss image-only PDFs.
 
 ## Installation
 
@@ -123,6 +145,12 @@ submission-checker --folder submissions --max-pages 12 --main-pages 10 --style i
 ```
 
 This scans all PDFs in the `submissions` folder with the same page limits and style check, saves results to `report.csv`.
+
+To also enable the experimental IEEE spacing heuristic:
+
+```bash
+submission-checker --folder submissions --max-pages 12 --main-pages 10 --style ieee --check-ieee-spacing --csv report.csv
+```
 
 Output:
 ```
