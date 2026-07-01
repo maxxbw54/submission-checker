@@ -720,7 +720,9 @@ def check_font_size_decrease(
                 if any(abs(page_size - allowed) <= 0.4 for allowed in baseline_allowed_sizes):
                     continue
 
-                if page_size < baseline_size * 0.9:
+                # References are legitimately ~0.8x body (e.g. IEEE 8pt vs 10pt),
+                # so only warn when they fall below that expected size.
+                if page_size < baseline_size * 0.8:
                     decrease_pct = round((1 - page_size / baseline_size) * 100)
                     return f"Font size decreases in references starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
         

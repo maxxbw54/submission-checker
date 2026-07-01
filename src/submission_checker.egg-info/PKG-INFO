@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: submission-checker
-Version: 0.1.0
-Summary: Tool to check academic conference submissions for policy compliance.
-Author-email: Your Name <you@example.com>
-License-File: LICENSE
-Dynamic: license-file

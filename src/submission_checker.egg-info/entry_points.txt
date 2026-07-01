@@ -1,2 +1,0 @@
-[console_scripts]
-submission-checker = submission_checker.checker:main
