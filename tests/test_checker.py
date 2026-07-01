@@ -427,7 +427,9 @@ def test_font_decrease_not_flagged_for_short_table_page(tmp_path, monkeypatch):
     assert not any("Font size decreases" in w for w in warns), f"Unexpected font-size warning: {warns}"
 
 
-def test_font_decrease_detected_in_references_section(tmp_path, monkeypatch):
+def test_normal_smaller_references_font_not_flagged(tmp_path, monkeypatch):
+    # References set ~8pt vs ~10pt body (IEEE \footnotesize) is legal, not a
+    # decrease, and must not be flagged (regression for a false positive).
     pdf_path = tmp_path / "refs_font_drop.pdf"
     texts = [
         "Body text " * 600,
@@ -452,7 +454,7 @@ def test_font_decrease_detected_in_references_section(tmp_path, monkeypatch):
     monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
 
     warns = checker.check_file(str(pdf_path), main_pages=10, check_reference_font_size=True)
-    assert any("Font size decreases in references" in w for w in warns), f"Expected references font-size warning, got: {warns}"
+    assert not any("Font size decreases" in w for w in warns), f"Unexpected references font-size warning: {warns}"
 
 
 def test_font_decrease_not_flagged_for_recurring_alternate_baseline_size(tmp_path, monkeypatch):
