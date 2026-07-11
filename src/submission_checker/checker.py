@@ -16,6 +16,7 @@ ALLOWED_EMAILS = {
     "authors@institutions.edu",
     "authors@instituitons.edu",
     "email@email.email",
+    "email@example.com",
     "anonymous@example.com",
 }
 SUSPICIOUS_PHRASES = [r"our previous work", r"our previous paper", r"in our previous work"]
@@ -28,9 +29,6 @@ STYLE_KEYWORDS = {
     "acm": [r"acm", r"association for computing machinery"],
     "ieee": [r"ieee", r"institute of electrical and electronics engineers"],
 }
-IEEE_BODY_FONT_TARGET = 10.0
-IEEE_REFERENCE_FONT_TARGET = 8.0
-IEEE_FONT_TARGET_TOLERANCE = 0.75
 IEEE_PAGE_WIDTH_PT = 612.0
 IEEE_COLUMN_WIDTH_PT = 252.0
 IEEE_COLUMN_GAP_PT = 12.0
@@ -187,16 +185,6 @@ def _estimate_typical_document_font(font_sizes: List[Optional[float]], page_limi
     if not candidates:
         return None
     return median(candidates)
-
-
-def _matches_expected_font_target(
-    page_size: float,
-    expected_size: Optional[float],
-    tolerance: float = IEEE_FONT_TARGET_TOLERANCE,
-) -> bool:
-    if expected_size is None:
-        return False
-    return abs(page_size - expected_size) <= tolerance
 
 
 def _is_references_header_line(line: str) -> bool:
@@ -919,145 +907,6 @@ def check_ieee_column_layout(
         return None
 
 
-def check_font_size_decrease(
-    pdf_path: Path,
-    main_pages_limit: int = 10,
-    references_page: Optional[int] = None,
-    page_texts: Optional[List[str]] = None,
-    check_references: bool = True,
-    style: Optional[str] = None,
-) -> Optional[str]:
-    """Check if font size significantly decreases anywhere in the main content area.
-    
-    Args:
-        pdf_path: Path to the PDF file
-        main_pages_limit: Expected limit for main content pages (to know where to check)
-    
-    Returns:
-        Warning message if font size decrease detected, None otherwise
-    """
-    try:
-        page_samples = extract_font_size_samples_per_page(pdf_path)
-        font_sizes = [_estimate_body_font_size(samples) for samples in page_samples]
-        
-        if not font_sizes or len(font_sizes) < 2:
-            return None
-        
-        # Filter out None values and track valid indices
-        valid_sizes = [(i, size) for i, size in enumerate(font_sizes) if size is not None]
-        
-        if len(valid_sizes) < 2:
-            return None
-        
-        normalized_style = (style or "").lower()
-        expected_main_font = IEEE_BODY_FONT_TARGET if normalized_style == "ieee" else None
-        expected_reference_font = IEEE_REFERENCE_FONT_TARGET if normalized_style == "ieee" else None
-
-        # Restrict to main-content pages only.
-        check_until_page = main_pages_limit
-        if references_page is not None and references_page > 1:
-            check_until_page = min(check_until_page, references_page - 1)
-
-        # Check first 3 pages as baseline for "normal" font size.
-        baseline_pages = valid_sizes[:min(3, len(valid_sizes))]
-        if not baseline_pages:
-            return None
-        
-        baseline_size = median(size for _, size in baseline_pages)
-
-        # Some templates legitimately use two stable text-size buckets in the
-        # early pages (e.g., around 10pt and 8pt). Treat such recurring sizes
-        # as allowed so they do not trigger a false "decrease" warning later.
-        baseline_page_indices = {idx for idx, _ in baseline_pages}
-        baseline_samples: List[float] = []
-        for idx in baseline_page_indices:
-            baseline_samples.extend(s for s in page_samples[idx] if 5.0 <= s <= 20.0)
-
-        baseline_bucket_counts = Counter(round(s, 1) for s in baseline_samples)
-        baseline_allowed_sizes = {baseline_size}
-        if baseline_bucket_counts:
-            max_count = max(baseline_bucket_counts.values())
-            min_alt_count = max(12, int(max_count * 0.3))
-            for bucket_size, bucket_count in baseline_bucket_counts.items():
-                if bucket_count >= min_alt_count:
-                    baseline_allowed_sizes.add(bucket_size)
-        
-        # Look for significant decreases in subsequent pages.
-        remaining_pages = [
-            (page_idx, page_size)
-            for page_idx, page_size in valid_sizes[3:]
-            if (page_idx + 1) <= check_until_page
-        ]
-        
-        for page_idx, page_size in remaining_pages:
-            if page_texts is not None and page_idx < len(page_texts):
-                if not _is_body_like_page(page_texts[page_idx]):
-                    continue
-
-            # If the page still contains enough baseline-sized text, this is
-            # usually a figure/caption-heavy page, not body text shrinking.
-            current_samples = [s for s in page_samples[page_idx] if 5.0 <= s <= 20.0]
-            baseline_like_count = sum(1 for s in current_samples if abs(s - baseline_size) <= 0.5)
-            if baseline_like_count >= 8:
-                continue
-
-            # If current page aligns with an allowed baseline size bucket,
-            # consider it stable and do not flag as a decrease.
-            if any(abs(page_size - allowed) <= 0.4 for allowed in baseline_allowed_sizes):
-                continue
-
-            if _matches_expected_font_target(page_size, expected_main_font):
-                continue
-
-            # If font size drops by more than 10%, flag it.
-            if page_size < baseline_size * 0.9:
-                decrease_pct = round((1 - page_size / baseline_size) * 100)
-                return f"Font size decreases in main content starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
-
-        # Optionally check reference pages as well when the references section exists.
-        if check_references and references_page is not None and references_page <= len(font_sizes):
-            reference_pages = [
-                (page_idx, page_size)
-                for page_idx, page_size in valid_sizes
-                if (page_idx + 1) >= references_page
-            ]
-
-            # References frequently use a smaller but consistent text size than
-            # the body. Build a references-local baseline from the first one or
-            # two reference pages and only flag further decreases within
-            # references, instead of comparing directly to the body baseline.
-            reference_baseline_candidates = [
-                page_size
-                for page_idx, page_size in reference_pages
-                if page_idx in {references_page - 1, references_page}
-            ]
-            if not reference_baseline_candidates and reference_pages:
-                reference_baseline_candidates = [reference_pages[0][1]]
-
-            reference_baseline_size = median(reference_baseline_candidates) if reference_baseline_candidates else None
-
-            # If references are stable at one smaller size (for example 8pt),
-            # do not treat them as a violation. We only flag shrinkage that
-            # occurs after references have already started.
-            for page_idx, page_size in reference_pages:
-                if reference_baseline_size is None:
-                    break
-
-                if _matches_expected_font_target(page_size, expected_reference_font):
-                    continue
-
-                if page_size < reference_baseline_size * 0.9:
-                    decrease_pct = round((1 - page_size / reference_baseline_size) * 100)
-                    return (
-                        f"Font size decreases in references starting from page {page_idx + 1} "
-                        f"(from {reference_baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
-                    )
-        
-        return None
-    except Exception:
-        return None
-
-
 def find_references_page(texts: List[str]) -> Optional[int]:
     for idx, txt in enumerate(texts):
         lines = txt.splitlines()
@@ -1341,7 +1190,6 @@ def check_file(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
-    check_reference_font_size: bool = True,
 ) -> List[str]:
     warnings: List[str] = []
     path = Path(file_path)
@@ -1462,14 +1310,13 @@ def check_file(
         elif detected == "ieee":
             warnings.append("Document appears to follow IEEE style.")
 
-    # check for email on page1
+    # Check for potentially identifying emails on page 1.
+    # We ignore known placeholder/anonymized addresses.
     if texts:
         page1 = texts[0]
-        email_match = EMAIL_RE.search(page1)
-        if email_match:
-            found_email = email_match.group(0).lower()
-            if found_email not in ALLOWED_EMAILS:
-                warnings.append("Non-anonymous email detected on page 1.")
+        found_emails = {email.lower() for email in EMAIL_RE.findall(page1)}
+        if any(email not in ALLOWED_EMAILS for email in found_emails):
+            warnings.append("Non-anonymous email detected on page 1.")
 
     # suspicious wording
     fulltext = "\n".join(texts)
@@ -1486,19 +1333,6 @@ def check_file(
             if author_str and author_str.lower() not in ("author", "anonymous", "ieee"):
                 warnings.append("PDF metadata contains potentially identifying information.")
 
-    # Check for font size decrease in main content area
-    main_pages_limit = main_pages if main_pages is not None else 10  # Default to 10 for ICSE
-    font_warning = check_font_size_decrease(
-        path,
-        main_pages_limit=main_pages_limit,
-        references_page=ref_page,
-        page_texts=texts,
-        check_references=check_reference_font_size,
-        style=style,
-    )
-    if font_warning:
-        warnings.append(font_warning)
-
     return warnings
 
 
@@ -1509,7 +1343,6 @@ def check_folder(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
-    check_reference_font_size: bool = True,
     workers: Optional[int] = None,
 ) -> dict:
     """Check all PDFs in a folder and subfolders, returning results.
@@ -1570,7 +1403,6 @@ def check_folder(
                     style=style,
                     timeout=timeout,
                     main_pages=main_pages,
-                    check_reference_font_size=check_reference_font_size,
                 )
             except Exception as e:
                 warnings = [f"Error processing file: {str(e)[:100]}"]
@@ -1599,7 +1431,6 @@ def check_folder(
                     style=style,
                     timeout=timeout,
                     main_pages=main_pages,
-                    check_reference_font_size=check_reference_font_size,
                 )
             except Exception as e:
                 warnings = [f"Error processing file: {str(e)[:100]}"]
@@ -1661,12 +1492,6 @@ def main():
         help="Declare expected style (acm or ieee) for additional validation",
     )
     parser.add_argument(
-        "--check-reference-font-size",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Also check for font-size shrinking in references (on by default; use --no-check-reference-font-size to disable).",
-    )
-    parser.add_argument(
         "--timeout",
         type=int,
         default=10,
@@ -1717,7 +1542,6 @@ def main():
             style=args.style,
             timeout=args.timeout,
             main_pages=args.main_pages,
-            check_reference_font_size=args.check_reference_font_size,
         )
         if warnings:
             print("Warnings:")
@@ -1737,7 +1561,6 @@ def main():
             style=args.style,
             timeout=args.timeout,
             main_pages=args.main_pages,
-            check_reference_font_size=args.check_reference_font_size,
             workers=args.workers,
         )
         
@@ -1755,9 +1578,12 @@ def main():
                 writer = csv.writer(csvfile)
                 writer.writerow(['Filename', 'Status', 'Issues'])
                 for filename, warnings in result["results"]:
-                    status = "PASS" if not warnings else "FAIL"
-                    issues = "; ".join(warnings) if warnings else ""
-                    writer.writerow([filename, status, issues])
+                    if not warnings:
+                        writer.writerow([filename, "PASS", ""])
+                        continue
+
+                    for issue in warnings:
+                        writer.writerow([filename, "FAIL", issue])
             print(f"CSV report written to {args.csv}")
             print(f"Summary: {result['passed']} passed, {result['failed']} failed out of {result['passed'] + result['failed']} files")
         else:

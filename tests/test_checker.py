@@ -82,7 +82,7 @@ def test_warnings(tmp_path, monkeypatch):
     pdf_path = tmp_path / "sample.pdf"
     print(f"PDF path: {pdf_path}")
     texts = [
-        "Title\nAuthor\nemail@example.com",
+        "Title\nAuthor\nreal.author@university.edu",
         "Content\nour previous paper [3]",
         "References",
         "Figure 1 after refs",
@@ -436,182 +436,17 @@ def test_anonymous_placeholder_email_not_flagged(tmp_path, monkeypatch):
     assert not any("Non-anonymous email" in w for w in warns), f"Unexpected email warning: {warns}"
 
 
-def test_font_decrease_detected_for_real_body_shrink(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "font_drop.pdf"
-    texts = ["p1", "p2", "p3", "p4", "References"]
-    make_pdf(texts, pdf_path)
-
-    # Page 4 genuinely shrinks from ~9.6 to ~8.1.
-    page_samples = [
-        [9.6] * 120,
-        [9.7] * 120,
-        [9.5] * 120,
-        [8.1] * 120,
-        [8.1] * 60,
-    ]
-
-    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
-
-    warns = checker.check_file(str(pdf_path), main_pages=10)
-    assert any("Font size decreases" in w for w in warns), f"Expected font-size warning, got: {warns}"
-
-
-def test_font_decrease_not_flagged_for_figure_heavy_page(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "figure_heavy.pdf"
-    texts = ["p1", "p2", "p3", "p4", "References"]
-    make_pdf(texts, pdf_path)
-
-    # Page 4 has many small labels but still enough baseline-sized body text.
-    page_samples = [
-        [9.6] * 120,
-        [9.7] * 120,
-        [9.5] * 120,
-        [6.2] * 240 + [9.6] * 24,
-        [9.6] * 60,
-    ]
-
-    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
-
-    warns = checker.check_file(str(pdf_path), main_pages=10)
-    assert not any("Font size decreases" in w for w in warns), f"Unexpected font-size warning: {warns}"
-
-
-def test_font_decrease_not_flagged_for_short_table_page(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "table_page.pdf"
+def test_example_placeholder_email_not_flagged(tmp_path, monkeypatch):
+    """Ensure example.com placeholder email does not trigger warning."""
+    pdf_path = tmp_path / "example_placeholder_email.pdf"
     texts = [
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "TABLE II Benchmarks N speedup values",  # short, table-heavy page
-        "Body text " * 600,
-        "References",
+        "Title\nAnonymous submission\nemail@example.com",
+        "Body text",
     ]
     make_pdf(texts, pdf_path)
-
-    page_samples = [
-        [9.96] * 200,
-        [9.96] * 200,
-        [9.96] * 200,
-        [7.97] * 220,
-        [9.96] * 200,
-        [9.96] * 50,
-    ]
-
     monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
 
-    warns = checker.check_file(str(pdf_path), main_pages=10)
-    assert not any("Font size decreases" in w for w in warns), f"Unexpected font-size warning: {warns}"
-
-
-def test_font_decrease_detected_in_references_section(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "refs_font_drop.pdf"
-    texts = [
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "References",
-        "[1] Ref entry",
-    ]
-    make_pdf(texts, pdf_path)
-
-    page_samples = [
-        [10.0] * 200,
-        [10.0] * 200,
-        [10.0] * 200,
-        [10.0] * 200,
-        [8.0] * 200,
-        [6.5] * 120,
-    ]
-
-    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
-
-    warns = checker.check_file(str(pdf_path), main_pages=10, check_reference_font_size=True)
-    assert any("Font size decreases in references" in w for w in warns), f"Expected references font-size warning, got: {warns}"
-
-
-def test_font_decrease_not_flagged_for_stable_smaller_references(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "refs_stable_8pt.pdf"
-    texts = [
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "References",
-        "[1] Ref entry",
-    ]
-    make_pdf(texts, pdf_path)
-    page_samples = [
-        [10.0] * 200,
-        [10.0] * 200,
-        [10.0] * 200,
-        [10.0] * 200,
-        [8.0] * 200,
-        [8.0] * 120,
-    ]
-
-    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
-
-    warns = checker.check_file(str(pdf_path), main_pages=10, check_reference_font_size=True)
-    assert not any("Font size decreases in references" in w for w in warns), f"Unexpected references font-size warning: {warns}"
-
-
-def test_ieee_reference_target_8pt_not_flagged_after_9pt_transition_page(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "ieee_refs_transition_page.pdf"
-    texts = [
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "Body text " * 600,
-        "References",
-        "[1] Ref entry",
-    ]
-    make_pdf(texts, pdf_path)
-
-    # The first references page can still estimate high because it mixes the
-    # tail of the body section with the references header. IEEE references that
-    # settle at ~8pt on the following page should not be flagged.
-    page_samples = [
-        [10.0] * 200,
-        [10.0] * 200,
-        [10.0] * 200,
-        [10.0] * 200,
-        [9.0] * 200,
-        [8.0] * 120,
-    ]
-
-    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
-
-    warns = checker.check_file(str(pdf_path), main_pages=10, style="ieee", check_reference_font_size=True)
-    assert not any("Font size decreases in references" in w for w in warns), f"Unexpected IEEE references font-size warning: {warns}"
-
-
-def test_font_decrease_not_flagged_for_recurring_alternate_baseline_size(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "alternate_baseline_size.pdf"
-    texts = ["Body text " * 700] * 6
-    make_pdf(texts, pdf_path)
-
-    # First 3 pages establish two recurring text-size buckets (10pt and 8pt).
-    # Later pages using the 8pt bucket should not be treated as a new decrease.
-    page_samples = [
-        [9.96] * 120 + [7.97] * 40,
-        [9.96] * 80 + [7.97] * 80,
-        [9.96] * 110 + [7.97] * 30,
-        [7.97] * 140,
-        [9.96] * 140,
-        [7.97] * 120,
-    ]
-
-    monkeypatch.setattr(checker, "extract_text_with_timeout", lambda p, timeout=10: texts)
-    monkeypatch.setattr(checker, "extract_font_size_samples_per_page", lambda p: page_samples)
-
-    warns = checker.check_file(str(pdf_path), main_pages=10)
-    assert not any("Font size decreases" in w for w in warns), f"Unexpected font-size warning: {warns}"
+    warns = checker.check_file(str(pdf_path))
+    assert not any("Non-anonymous email" in w for w in warns), f"Unexpected email warning: {warns}"
 
 
