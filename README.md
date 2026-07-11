@@ -14,8 +14,6 @@ A command-line tool for academic conference submissions that automatically valid
 - **Suspicious wording** – Identify potentially revealing phrases like "our previous paper [3]".
 - **Metadata inspection** – Inspect PDF metadata for possible author information that could reveal identity.
 - **Font size detection** – Flag PDFs where font size decreases in the main content/body area; optional extra check for reference-section shrink.
-- **IEEE spacing check** – Optional heuristic to flag IEEE submissions where line spacing appears compressed, including unusually tight spacing after section/subsection headings.
-- **IEEE column size check** – Detect potential IEEE layout tampering, including non-standard column widths, reduced distance between columns, and single-column body pages.
 
 ## Options
 
@@ -25,7 +23,6 @@ A command-line tool for academic conference submissions that automatically valid
 - `--min-pages <int>`: Minimum total pages required (main text + references)
 - `--main-pages <int>`: Maximum pages for main text (default: 10)
 - `--style <acm|ieee>`: Expected citation style for validation
-- `--check-ieee-spacing`: Enable the experimental IEEE line-spacing heuristic (off by default)
 - `--check-reference-font-size`: Also check for font-size shrinking in references (off by default)
 - `--timeout <int>`: Maximum seconds for PDF text extraction (default: 10)
 - `--csv <path>`: Output CSV report file (requires `--folder`)
@@ -95,30 +92,6 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Example warning**: `Font size decreases in main content starting from page 6 (from 10.1pt to 9.0pt, 10% reduction).`
 - **Note**: This detects a common technique to fit more content by reducing font size mid-document. The check is flexible and detects font shrinking at any point in the main content, not just at a specific page.
 
-### 11. IEEE Line Spacing Check
-- **Logic**: Uses PDF text positions to estimate vertical gaps between adjacent lines, builds a baseline from the early body pages, and flags later pages when prose lines are consistently tighter than that baseline.
-- **Configuration**: Active only when both `--style ieee` and `--check-ieee-spacing` are used.
-- **Detects**:
-  - Compressed spacing between body-text lines
-  - Compressed spacing between a section or subsection heading and the first paragraph line
-- **Detection scope**: Main-content pages only; pages dominated by figures or tables are skipped when possible.
-- **Output**: Emits a warning with the page number and whether the issue looks like general line compression or a heading-to-paragraph spacing issue.
-- **Note**: This is an experimental supporting heuristic intended to catch layout tightening that may violate IEEE spacing expectations. It depends on extractable PDF layout information and may miss image-only PDFs.
-
-### 12. IEEE Column Size and Gap Check
-- **Logic**: Uses per-line x coordinates to estimate left/right column envelopes and compare them against IEEE two-column geometry. The IEEEtran class defaults are approximately:
-  - Column width: 21pc (about 252pt)
-  - Column gap (`\columnsep`): 1pc (about 12pt)
-  - Text width: 43pc (about 516pt)
-- **Configuration**: Active when `--style ieee` is used.
-- **Detects**:
-  - Pages that look like single-column body layout
-  - Non-standard column widths relative to IEEE expectations and early-page baseline
-  - Narrowed inter-column spacing (reduced column gap)
-- **Detection scope**: Main-content pages only (stops before references when references are detected).
-- **Output**: Emits warnings with affected page numbers, e.g. `Column width appears non-standard for IEEE layout...` or `Distance between columns appears narrower than IEEE expectations...`.
-- **Note**: This check is heuristic and depends on extractable text geometry. It may not trigger on scanned/image-only PDFs.
-
 ## Installation
 
 ```bash
@@ -166,12 +139,6 @@ submission-checker --folder submissions --max-pages 12 --main-pages 10 --style i
 ```
 
 This scans all PDFs in the `submissions` folder with the same page limits and style check, saves results to `report.csv`.
-
-To also enable the experimental IEEE spacing heuristic:
-
-```bash
-submission-checker --folder submissions --max-pages 12 --main-pages 10 --style ieee --check-ieee-spacing --csv report.csv
-```
 
 Output:
 ```

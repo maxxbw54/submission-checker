@@ -1341,7 +1341,6 @@ def check_file(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
-    check_ieee_spacing: bool = True,
     check_reference_font_size: bool = True,
 ) -> List[str]:
     warnings: List[str] = []
@@ -1500,26 +1499,6 @@ def check_file(
     if font_warning:
         warnings.append(font_warning)
 
-    if style == "ieee":
-        column_warning = check_ieee_column_layout(
-            path,
-            main_pages_limit=main_pages_limit,
-            references_page=ref_page,
-            page_texts=texts,
-        )
-        if column_warning:
-            warnings.append(column_warning)
-
-        if check_ieee_spacing:
-            spacing_warning = check_ieee_line_spacing(
-                path,
-                main_pages_limit=main_pages_limit,
-                references_page=ref_page,
-                page_texts=texts,
-            )
-            if spacing_warning:
-                warnings.append(spacing_warning)
-
     return warnings
 
 
@@ -1530,7 +1509,6 @@ def check_folder(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
-    check_ieee_spacing: bool = True,
     check_reference_font_size: bool = True,
     workers: Optional[int] = None,
 ) -> dict:
@@ -1592,7 +1570,6 @@ def check_folder(
                     style=style,
                     timeout=timeout,
                     main_pages=main_pages,
-                    check_ieee_spacing=check_ieee_spacing,
                     check_reference_font_size=check_reference_font_size,
                 )
             except Exception as e:
@@ -1622,7 +1599,6 @@ def check_folder(
                     style=style,
                     timeout=timeout,
                     main_pages=main_pages,
-                    check_ieee_spacing=check_ieee_spacing,
                     check_reference_font_size=check_reference_font_size,
                 )
             except Exception as e:
@@ -1685,12 +1661,6 @@ def main():
         help="Declare expected style (acm or ieee) for additional validation",
     )
     parser.add_argument(
-        "--check-ieee-spacing",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable the experimental IEEE line-spacing heuristic (on by default; use --no-check-ieee-spacing to disable).",
-    )
-    parser.add_argument(
         "--check-reference-font-size",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1747,7 +1717,6 @@ def main():
             style=args.style,
             timeout=args.timeout,
             main_pages=args.main_pages,
-            check_ieee_spacing=args.check_ieee_spacing,
             check_reference_font_size=args.check_reference_font_size,
         )
         if warnings:
@@ -1768,7 +1737,6 @@ def main():
             style=args.style,
             timeout=args.timeout,
             main_pages=args.main_pages,
-            check_ieee_spacing=args.check_ieee_spacing,
             check_reference_font_size=args.check_reference_font_size,
             workers=args.workers,
         )
