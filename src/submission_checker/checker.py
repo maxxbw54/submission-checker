@@ -2,6 +2,7 @@
 import re
 import sys
 import csv
+import os
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 from collections import Counter
@@ -19,13 +20,28 @@ ALLOWED_EMAILS = {
 }
 SUSPICIOUS_PHRASES = [r"our previous work", r"our previous paper", r"in our previous work"]
 REFERENCES_HEADER = re.compile(r"^references?\s*:?\s*$", flags=re.IGNORECASE)
+APPENDIX_HEADER = re.compile(
+    r"^\s*(appendix|appendices)\b(?:\s+[A-Z0-9]+)?(?:\s*[:.-]\s*.*)?\s*$",
+    flags=re.IGNORECASE,
+)
 STYLE_KEYWORDS = {
     "acm": [r"acm", r"association for computing machinery"],
     "ieee": [r"ieee", r"institute of electrical and electronics engineers"],
 }
+IEEE_BODY_FONT_TARGET = 10.0
+IEEE_REFERENCE_FONT_TARGET = 8.0
+IEEE_FONT_TARGET_TOLERANCE = 0.75
+IEEE_PAGE_WIDTH_PT = 612.0
+IEEE_COLUMN_WIDTH_PT = 252.0
+IEEE_COLUMN_GAP_PT = 12.0
+IEEE_TEXT_WIDTH_PT = IEEE_COLUMN_WIDTH_PT * 2 + IEEE_COLUMN_GAP_PT
+IEEE_COLUMN_WIDTH_RATIO = IEEE_COLUMN_WIDTH_PT / IEEE_PAGE_WIDTH_PT
+IEEE_COLUMN_GAP_RATIO = IEEE_COLUMN_GAP_PT / IEEE_PAGE_WIDTH_PT
+IEEE_TEXT_WIDTH_RATIO = IEEE_TEXT_WIDTH_PT / IEEE_PAGE_WIDTH_PT
 
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import as_completed
 
 
 def extract_text_per_page(pdf_path: Path) -> List[str]:
@@ -50,14 +66,18 @@ def extract_text_with_timeout(pdf_path: Path, timeout: int = 10) -> List[str]:
     slow or locked network files. If extraction does not complete in time, we return
     an empty list to signal failure.
     """
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(extract_text_per_page, pdf_path)
-        try:
-            return future.result(timeout=timeout)
-        except FuturesTimeoutError:
-            return []
-        except Exception:
-            return []
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(extract_text_per_page, pdf_path)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError:
+        future.cancel()
+        return []
+    except Exception:
+        return []
+    finally:
+        # Do not block caller on shutdown if the worker is stuck in PDF parsing.
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def get_metadata(pdf_path: Path) -> dict:
@@ -150,6 +170,33 @@ def _estimate_body_font_size(page_font_sizes: List[float]) -> Optional[float]:
     if len(neighborhood) >= 5:
         return median(neighborhood)
     return median(valid)
+
+
+def _estimate_typical_document_font(font_sizes: List[Optional[float]], page_limit: int) -> Optional[float]:
+    """Estimate the typical body font across the main content pages.
+
+    This gives spacing checks a stable fallback when a table-heavy page causes
+    the page-local dominant font to jump away from the manuscript's actual body
+    text size.
+    """
+    candidates = [
+        font_size
+        for font_size in font_sizes[:page_limit]
+        if font_size is not None and 6.0 <= font_size <= 14.0
+    ]
+    if not candidates:
+        return None
+    return median(candidates)
+
+
+def _matches_expected_font_target(
+    page_size: float,
+    expected_size: Optional[float],
+    tolerance: float = IEEE_FONT_TARGET_TOLERANCE,
+) -> bool:
+    if expected_size is None:
+        return False
+    return abs(page_size - expected_size) <= tolerance
 
 
 def _is_references_header_line(line: str) -> bool:
@@ -400,6 +447,49 @@ def _is_heading_line(text: str, font_size: float, body_font_size: Optional[float
     return False
 
 
+def _is_strong_heading_line(text: str, font_size: float, body_font_size: Optional[float]) -> bool:
+    """Conservative heading classifier used by spacing heuristics.
+
+    PDF extraction from tables and diagrams often yields short label fragments
+    that look like headings (e.g., "Control", "Access", "KU-3"). This helper
+    keeps the heading detector stricter for spacing checks to reduce
+    false-positive warnings.
+    """
+    if not _is_heading_line(text, font_size, body_font_size):
+        return False
+
+    # Reject obviously corrupted extraction sizes that often come from tables
+    # and vector labels rather than actual section headings.
+    if font_size <= 0 or font_size > 40.0:
+        return False
+
+    compact = " ".join(text.split())
+    numbered_section = bool(
+        re.match(r"^(?:\d+(?:\.\d+)*|[IVXLCM]+)\.?\s+[A-Z][A-Za-z0-9\-]{3,}", compact)
+    )
+    if len(compact) < 12 and not numbered_section:
+        return False
+
+    if re.search(r"\b(fig\.|figure|table)\b", compact, flags=re.IGNORECASE):
+        return False
+
+    words = re.findall(r"[A-Za-z][A-Za-z0-9\-]*", compact)
+    if len(words) < 2 and not numbered_section:
+        return False
+
+    # Keep heading-size tolerance narrow enough to reject large diagram labels
+    # while still allowing common IEEE section heading sizes.
+    if body_font_size is not None:
+        if font_size < body_font_size * 0.92:
+            return False
+        if font_size > body_font_size * 1.35:
+            return False
+    elif font_size > 24.0:
+        return False
+
+    return True
+
+
 def _is_body_text_line(text: str) -> bool:
     compact = " ".join(text.split())
     if len(compact) < 25:
@@ -408,6 +498,37 @@ def _is_body_text_line(text: str) -> bool:
         return False
     if re.match(r"^(references?|figure|fig\.|table|appendix)\b", compact, flags=re.IGNORECASE):
         return False
+    return True
+
+
+def _is_spacing_body_line(
+    text: str,
+    font_size: float,
+    body_font_size: Optional[float],
+    page_width: float,
+    min_x: float,
+    max_x: float,
+) -> bool:
+    """Filter line candidates down to prose-like body text for spacing checks."""
+    if not _is_body_text_line(text):
+        return False
+
+    compact = " ".join(text.split())
+    words = re.findall(r"[A-Za-z][A-Za-z0-9\-]*", compact)
+    if len(words) < 5:
+        return False
+
+    if not re.search(r"[a-z]", compact):
+        return False
+
+    line_width = max_x - min_x
+    if page_width > 0 and max_x > min_x:
+        if line_width < max(60.0, page_width * 0.10):
+            return False
+
+    if body_font_size is not None and abs(font_size - body_font_size) > 1.0:
+        return False
+
     return True
 
 
@@ -472,19 +593,44 @@ def check_ieee_line_spacing(
         if references_page is not None and references_page > 1:
             check_until_page = min(check_until_page, references_page - 1)
 
+        typical_body_font = _estimate_typical_document_font(font_sizes, check_until_page)
+
+        def _spacing_body_font(page_font: Optional[float]) -> Optional[float]:
+            if page_font is None:
+                return typical_body_font
+            if typical_body_font is None:
+                return page_font
+            if page_font < typical_body_font * 0.85 or page_font > typical_body_font * 1.15:
+                return typical_body_font
+            return page_font
+
         baseline_gaps: List[float] = []
         baseline_pages = min(3, len(line_metrics), check_until_page)
         for page_idx in range(baseline_pages):
             lines = line_metrics[page_idx]
-            body_font_size = font_sizes[page_idx] if page_idx < len(font_sizes) else None
+            body_font_size = _spacing_body_font(font_sizes[page_idx] if page_idx < len(font_sizes) else None)
             page_width = page_widths[page_idx] if page_idx < len(page_widths) else 0.0
             for group in _split_lines_for_spacing(lines, page_width):
                 for current, following in zip(group, group[1:]):
-                    if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
+                    if not (
+                        _is_spacing_body_line(
+                            current["text"],
+                            current["font_size"],
+                            body_font_size,
+                            page_width,
+                            current.get("min_x", 0.0),
+                            current.get("max_x", current.get("min_x", 0.0)),
+                        )
+                        and _is_spacing_body_line(
+                            following["text"],
+                            following["font_size"],
+                            body_font_size,
+                            page_width,
+                            following.get("min_x", 0.0),
+                            following.get("max_x", following.get("min_x", 0.0)),
+                        )
+                    ):
                         continue
-                    if body_font_size is not None:
-                        if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
-                            continue
                     gap = current["y"] - following["y"]
                     if 6.0 <= gap <= 24.0:
                         baseline_gaps.append(gap)
@@ -494,14 +640,15 @@ def check_ieee_line_spacing(
 
         baseline_gap = median(baseline_gaps)
         compressed_pages: List[int] = []
-        heading_spacing_warnings: List[str] = []
+        heading_hits_by_page: Dict[int, int] = {}
+        heading_min_gap_by_page: Dict[int, float] = {}
 
         for page_idx in range(baseline_pages, min(check_until_page, len(line_metrics))):
             if page_texts is not None and page_idx < len(page_texts) and not _is_body_like_page(page_texts[page_idx]):
                 continue
 
             lines = line_metrics[page_idx]
-            body_font_size = font_sizes[page_idx] if page_idx < len(font_sizes) else None
+            body_font_size = _spacing_body_font(font_sizes[page_idx] if page_idx < len(font_sizes) else None)
             body_gaps: List[float] = []
             page_width = page_widths[page_idx] if page_idx < len(page_widths) else 0.0
 
@@ -511,19 +658,41 @@ def check_ieee_line_spacing(
                     if gap <= 0:
                         continue
 
-                    if _is_heading_line(current["text"], current["font_size"], body_font_size) and _is_body_text_line(following["text"]):
-                        if gap < baseline_gap * 0.78:
-                            heading_spacing_warnings.append(
-                                f"Line spacing appears compressed near a heading on page {page_idx + 1} "
-                                f"(gap {gap:.1f}pt vs baseline {baseline_gap:.1f}pt)."
-                            )
+                    if _is_strong_heading_line(current["text"], current["font_size"], body_font_size) and _is_spacing_body_line(
+                        following["text"],
+                        following["font_size"],
+                        body_font_size,
+                        page_width,
+                        following.get("min_x", 0.0),
+                        following.get("max_x", following.get("min_x", 0.0)),
+                    ):
+                        # Use a stricter threshold for heading transitions; many
+                        # false positives come from extracted table/diagram labels.
+                        if gap < baseline_gap * 0.68:
+                            page_num = page_idx + 1
+                            heading_hits_by_page[page_num] = heading_hits_by_page.get(page_num, 0) + 1
+                            prev_min = heading_min_gap_by_page.get(page_num)
+                            heading_min_gap_by_page[page_num] = gap if prev_min is None else min(prev_min, gap)
 
-                    if not (_is_body_text_line(current["text"]) and _is_body_text_line(following["text"])):
+                    if not (
+                        _is_spacing_body_line(
+                            current["text"],
+                            current["font_size"],
+                            body_font_size,
+                            page_width,
+                            current.get("min_x", 0.0),
+                            current.get("max_x", current.get("min_x", 0.0)),
+                        )
+                        and _is_spacing_body_line(
+                            following["text"],
+                            following["font_size"],
+                            body_font_size,
+                            page_width,
+                            following.get("min_x", 0.0),
+                            following.get("max_x", following.get("min_x", 0.0)),
+                        )
+                    ):
                         continue
-
-                    if body_font_size is not None:
-                        if abs(current["font_size"] - body_font_size) > 1.0 or abs(following["font_size"] - body_font_size) > 1.0:
-                            continue
 
                     if 4.0 <= gap <= 24.0:
                         body_gaps.append(gap)
@@ -536,8 +705,28 @@ def check_ieee_line_spacing(
 
         all_warnings: List[str] = []
         
-        # Add heading spacing warnings
-        all_warnings.extend(heading_spacing_warnings)
+        # De-duplicate heading warnings by page. We only report a page when
+        # there is repeated evidence or one very strong compression event.
+        compressed_page_set = set(compressed_pages)
+        heading_warning_pages = [
+            page
+            for page, count in heading_hits_by_page.items()
+            if (
+                count >= 3
+                or (count >= 2 and heading_min_gap_by_page.get(page, baseline_gap) < baseline_gap * 0.65)
+                or (
+                    page in compressed_page_set
+                    and count >= 1
+                    and heading_min_gap_by_page.get(page, baseline_gap) < baseline_gap * 0.68
+                )
+            )
+        ]
+        if heading_warning_pages:
+            pages = ", ".join(str(page) for page in sorted(heading_warning_pages)[:3])
+            all_warnings.append(
+                "Line spacing appears compressed near a heading "
+                f"on page(s) {pages} (baseline {baseline_gap:.1f}pt)."
+            )
         
         # Add compressed pages warning
         if compressed_pages:
@@ -561,7 +750,66 @@ def check_ieee_column_layout(
     references_page: Optional[int] = None,
     page_texts: Optional[List[str]] = None,
 ) -> Optional[str]:
-    """Detect likely single-column body layout in IEEE manuscripts."""
+    """Detect suspicious IEEE two-column geometry changes.
+
+    We flag pages that likely switched to single-column prose, materially
+    changed column width, or reduced the gutter between columns.
+    """
+
+    def _percentile(values: List[float], q: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        q = min(1.0, max(0.0, q))
+        pos = q * (len(ordered) - 1)
+        lower = int(pos)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = pos - lower
+        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+    def _estimate_two_column_metrics(page_blocks: List[Dict[str, Any]], page_width: float) -> Optional[Dict[str, float]]:
+        if page_width <= 0:
+            return None
+
+        center = page_width / 2.0
+        # Keep this narrow so small gutter changes are still measurable.
+        split_margin = max(2.0, page_width * 0.004)
+        body_blocks = [block for block in page_blocks if _is_body_text_line(block.get("text", ""))]
+        if len(body_blocks) < 6:
+            return None
+
+        left_blocks = [
+            block for block in body_blocks
+            if float(block.get("max_x", 0.0)) <= center - split_margin
+        ]
+        right_blocks = [
+            block for block in body_blocks
+            if float(block.get("min_x", 0.0)) >= center + split_margin
+        ]
+        if len(left_blocks) < 3 or len(right_blocks) < 3:
+            return None
+
+        left_min = _percentile([float(block.get("min_x", 0.0)) for block in left_blocks], 0.15)
+        left_max = _percentile([float(block.get("max_x", 0.0)) for block in left_blocks], 0.85)
+        right_min = _percentile([float(block.get("min_x", 0.0)) for block in right_blocks], 0.15)
+        right_max = _percentile([float(block.get("max_x", 0.0)) for block in right_blocks], 0.85)
+
+        left_width = left_max - left_min
+        right_width = right_max - right_min
+        column_gap = right_min - left_max
+        text_span = right_max - left_min
+
+        if min(left_width, right_width, column_gap, text_span) <= 0:
+            return None
+
+        return {
+            "avg_column_width": (left_width + right_width) / 2.0,
+            "column_gap": column_gap,
+            "text_span": text_span,
+        }
+
     try:
         page_blocks = extract_text_blocks_per_page(pdf_path)
         page_widths = extract_page_widths(pdf_path)
@@ -573,7 +821,10 @@ def check_ieee_column_layout(
             check_until_page = min(check_until_page, references_page - 1)
 
         start_page = 1 if check_until_page >= 2 else 0
-        suspect_pages: List[int] = []
+        single_column_pages: List[int] = []
+        width_change_pages: List[int] = []
+        narrow_gap_pages: List[int] = []
+        metric_pages: List[Tuple[int, float, Dict[str, float]]] = []
 
         for page_idx in range(start_page, min(check_until_page, len(page_blocks), len(page_widths))):
             if page_texts is not None and page_idx < len(page_texts) and not _is_body_like_page(page_texts[page_idx]):
@@ -581,6 +832,11 @@ def check_ieee_column_layout(
 
             page_width = page_widths[page_idx]
             if page_width <= 0:
+                continue
+
+            metrics = _estimate_two_column_metrics(page_blocks[page_idx], page_width)
+            if metrics is not None:
+                metric_pages.append((page_idx + 1, page_width, metrics))
                 continue
 
             center = page_width / 2.0
@@ -606,14 +862,57 @@ def check_ieee_column_layout(
             ]
 
             if len(spanning_blocks) >= max(4, len(body_blocks) // 2) and len(right_blocks) <= max(1, len(body_blocks) // 8):
-                suspect_pages.append(page_idx + 1)
+                single_column_pages.append(page_idx + 1)
 
-        if suspect_pages:
-            pages = ", ".join(str(page) for page in suspect_pages[:3])
-            return (
+        if metric_pages:
+            baseline_slice = metric_pages[:min(2, len(metric_pages))]
+            baseline_col_width = median(item[2]["avg_column_width"] for item in baseline_slice)
+            baseline_gap = median(item[2]["column_gap"] for item in baseline_slice)
+
+            for page_num, page_width, metrics in metric_pages:
+                expected_col_width = page_width * IEEE_COLUMN_WIDTH_RATIO
+                expected_gap = page_width * IEEE_COLUMN_GAP_RATIO
+                expected_text_span = page_width * IEEE_TEXT_WIDTH_RATIO
+
+                avg_col_width = metrics["avg_column_width"]
+                column_gap = metrics["column_gap"]
+                text_span = metrics["text_span"]
+
+                width_far_from_ieee = abs(avg_col_width - expected_col_width) > expected_col_width * 0.10
+                width_far_from_baseline = abs(avg_col_width - baseline_col_width) > baseline_col_width * 0.08
+                text_span_far_from_ieee = abs(text_span - expected_text_span) > expected_text_span * 0.05
+                if (width_far_from_ieee and width_far_from_baseline) or text_span_far_from_ieee:
+                    width_change_pages.append(page_num)
+
+                gap_far_from_ieee = column_gap < expected_gap * 0.75
+                gap_far_from_baseline = column_gap < baseline_gap * 0.80
+                if gap_far_from_ieee and gap_far_from_baseline:
+                    narrow_gap_pages.append(page_num)
+
+        warnings: List[str] = []
+        if single_column_pages:
+            pages = ", ".join(str(page) for page in single_column_pages[:3])
+            warnings.append(
                 "Body layout appears single-column instead of IEEE two-column "
                 f"on page(s) {pages}."
             )
+
+        if width_change_pages:
+            pages = ", ".join(str(page) for page in sorted(set(width_change_pages))[:3])
+            warnings.append(
+                "Column width appears non-standard for IEEE layout "
+                f"on page(s) {pages}."
+            )
+
+        if narrow_gap_pages:
+            pages = ", ".join(str(page) for page in sorted(set(narrow_gap_pages))[:3])
+            warnings.append(
+                "Distance between columns appears narrower than IEEE expectations "
+                f"on page(s) {pages}."
+            )
+
+        if warnings:
+            return " ".join(warnings)
 
         return None
     except Exception:
@@ -626,6 +925,7 @@ def check_font_size_decrease(
     references_page: Optional[int] = None,
     page_texts: Optional[List[str]] = None,
     check_references: bool = True,
+    style: Optional[str] = None,
 ) -> Optional[str]:
     """Check if font size significantly decreases anywhere in the main content area.
     
@@ -649,6 +949,10 @@ def check_font_size_decrease(
         if len(valid_sizes) < 2:
             return None
         
+        normalized_style = (style or "").lower()
+        expected_main_font = IEEE_BODY_FONT_TARGET if normalized_style == "ieee" else None
+        expected_reference_font = IEEE_REFERENCE_FONT_TARGET if normalized_style == "ieee" else None
+
         # Restrict to main-content pages only.
         check_until_page = main_pages_limit
         if references_page is not None and references_page > 1:
@@ -702,6 +1006,9 @@ def check_font_size_decrease(
             if any(abs(page_size - allowed) <= 0.4 for allowed in baseline_allowed_sizes):
                 continue
 
+            if _matches_expected_font_target(page_size, expected_main_font):
+                continue
+
             # If font size drops by more than 10%, flag it.
             if page_size < baseline_size * 0.9:
                 decrease_pct = round((1 - page_size / baseline_size) * 100)
@@ -715,14 +1022,36 @@ def check_font_size_decrease(
                 if (page_idx + 1) >= references_page
             ]
 
+            # References frequently use a smaller but consistent text size than
+            # the body. Build a references-local baseline from the first one or
+            # two reference pages and only flag further decreases within
+            # references, instead of comparing directly to the body baseline.
+            reference_baseline_candidates = [
+                page_size
+                for page_idx, page_size in reference_pages
+                if page_idx in {references_page - 1, references_page}
+            ]
+            if not reference_baseline_candidates and reference_pages:
+                reference_baseline_candidates = [reference_pages[0][1]]
+
+            reference_baseline_size = median(reference_baseline_candidates) if reference_baseline_candidates else None
+
+            # If references are stable at one smaller size (for example 8pt),
+            # do not treat them as a violation. We only flag shrinkage that
+            # occurs after references have already started.
             for page_idx, page_size in reference_pages:
-                # If references align with baseline size buckets, treat as stable.
-                if any(abs(page_size - allowed) <= 0.4 for allowed in baseline_allowed_sizes):
+                if reference_baseline_size is None:
+                    break
+
+                if _matches_expected_font_target(page_size, expected_reference_font):
                     continue
 
-                if page_size < baseline_size * 0.9:
-                    decrease_pct = round((1 - page_size / baseline_size) * 100)
-                    return f"Font size decreases in references starting from page {page_idx + 1} (from {baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
+                if page_size < reference_baseline_size * 0.9:
+                    decrease_pct = round((1 - page_size / reference_baseline_size) * 100)
+                    return (
+                        f"Font size decreases in references starting from page {page_idx + 1} "
+                        f"(from {reference_baseline_size:.1f}pt to {page_size:.1f}pt, {decrease_pct}% reduction)."
+                    )
         
         return None
     except Exception:
@@ -802,6 +1131,26 @@ def contains_figure_table_appendix(text: str) -> bool:
     # Pattern looks for "Figure/Table/Fig." followed by arabic or roman numbering.
     caption_pattern = r"\b(Figure|Table|Fig\.)\s+([0-9]+|[IVXLC]+)\b\s*:?"
     return bool(re.search(caption_pattern, text, flags=re.IGNORECASE))
+
+
+def _contains_appendix_header(page_text: str) -> bool:
+    """Detect likely appendix section headers on a page."""
+    for line in (page_text or "").splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if APPENDIX_HEADER.match(candidate):
+            return True
+    return False
+
+
+def find_appendix_pages_outside_main_pages(texts: List[str], main_pages_limit: int) -> List[int]:
+    """Return pages where appendix headers appear after the main-page limit."""
+    appendix_pages: List[int] = []
+    for page_idx in range(main_pages_limit, len(texts)):
+        if _contains_appendix_header(texts[page_idx]):
+            appendix_pages.append(page_idx + 1)
+    return appendix_pages
 
 
 def _is_body_like_page(text: str) -> bool:
@@ -992,8 +1341,8 @@ def check_file(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
-    check_ieee_spacing: bool = False,
-    check_reference_font_size: bool = False,
+    check_ieee_spacing: bool = True,
+    check_reference_font_size: bool = True,
 ) -> List[str]:
     warnings: List[str] = []
     path = Path(file_path)
@@ -1004,8 +1353,24 @@ def check_file(
         texts = extract_text_with_timeout(path, timeout=timeout)
     except Exception as e:
         return [f"Error reading PDF: {str(e)[:100]}"]
-    
-    # If no text could be extracted, still return a warning
+
+    # A one-time retry helps reduce transient extraction failures under
+    # parallel load without affecting normal successful files.
+    if not texts:
+        retry_timeout = max(timeout + 10, timeout * 3)
+        if retry_timeout != timeout:
+            try:
+                texts = extract_text_with_timeout(path, timeout=retry_timeout)
+            except Exception:
+                texts = []
+
+    # Final fallback to direct extraction path.
+    if not texts:
+        try:
+            texts = extract_text_per_page(path)
+        except Exception:
+            texts = []
+
     if not texts:
         return [f"Could not extract text from PDF (possibly corrupted, encrypted, or slow to read)."]
     
@@ -1045,13 +1410,19 @@ def check_file(
         after_refs = []
         for pageno in range(ref_page - 1, num_pages):
             page_num = pageno + 1  # Convert to 1-indexed
-            # Only flag if page is beyond the figure check limit
+            # Only flag if page is beyond the figure/table check limit
             if page_num > figure_check_limit and contains_figure_table_appendix(texts[pageno]):
                 after_refs.append(page_num)
         if after_refs:
             warnings.append(
-                f"Figures/tables/appendix appear on pages after references: {after_refs}."
+                f"Figures/tables appear on pages after references: {after_refs}."
             )
+
+    appendix_pages = find_appendix_pages_outside_main_pages(texts, main_pages_limit)
+    if appendix_pages:
+        warnings.append(
+            f"Appendix content appears outside main pages on page(s): {appendix_pages}."
+        )
 
     # style detection
     combined = "\n".join(texts[:2])
@@ -1124,6 +1495,7 @@ def check_file(
         references_page=ref_page,
         page_texts=texts,
         check_references=check_reference_font_size,
+        style=style,
     )
     if font_warning:
         warnings.append(font_warning)
@@ -1158,8 +1530,9 @@ def check_folder(
     style: Optional[str] = None,
     timeout: int = 10,
     main_pages: Optional[int] = None,
-    check_ieee_spacing: bool = False,
-    check_reference_font_size: bool = False,
+    check_ieee_spacing: bool = True,
+    check_reference_font_size: bool = True,
+    workers: Optional[int] = None,
 ) -> dict:
     """Check all PDFs in a folder and subfolders, returning results.
     
@@ -1185,36 +1558,100 @@ def check_folder(
     if not pdf_files:
         return {"passed": 0, "failed": 0, "results": [], "message": "No PDF files found in folder or subfolders."}
     
-    count = 0
-    for pdf_file in pdf_files:
-        count += 1
-        # Get relative path for display
-        try:
-            rel_path = pdf_file.relative_to(folder)
-        except ValueError:
-            rel_path = pdf_file
-        
-        print(f"Checking file {count}/{len(pdf_files)}: {rel_path}")
-        
-        try:
-            warnings = check_file(
-                str(pdf_file),
-                max_pages=max_pages,
-                min_pages=min_pages,
-                style=style,
-                timeout=timeout,
-                main_pages=main_pages,
-                check_ieee_spacing=check_ieee_spacing,
-                check_reference_font_size=check_reference_font_size,
-            )
-        except Exception as e:
-            warnings = [f"Error processing file: {str(e)[:100]}"]
-        
-        results.append((str(rel_path), warnings))
-        if warnings:
-            failed += 1
-        else:
-            passed += 1
+    def _resolve_workers(total_files: int, requested_workers: Optional[int]) -> int:
+        if total_files <= 1:
+            return 1
+
+        if requested_workers is not None:
+            return max(1, min(requested_workers, total_files))
+
+        cpu_count = os.cpu_count() or 4
+        # PDF parsing is mixed IO/CPU; this keeps concurrency high without oversubscription.
+        auto_workers = min(16, max(4, cpu_count * 2))
+        return max(1, min(auto_workers, total_files))
+
+    worker_count = _resolve_workers(len(pdf_files), workers)
+
+    if worker_count == 1:
+        count = 0
+        for pdf_file in pdf_files:
+            count += 1
+            # Get relative path for display
+            try:
+                rel_path = pdf_file.relative_to(folder)
+            except ValueError:
+                rel_path = pdf_file
+
+            print(f"Checking file {count}/{len(pdf_files)}: {rel_path}")
+
+            try:
+                warnings = check_file(
+                    str(pdf_file),
+                    max_pages=max_pages,
+                    min_pages=min_pages,
+                    style=style,
+                    timeout=timeout,
+                    main_pages=main_pages,
+                    check_ieee_spacing=check_ieee_spacing,
+                    check_reference_font_size=check_reference_font_size,
+                )
+            except Exception as e:
+                warnings = [f"Error processing file: {str(e)[:100]}"]
+
+            results.append((str(rel_path), warnings))
+            if warnings:
+                failed += 1
+            else:
+                passed += 1
+    else:
+        indexed_pdf_files: List[Tuple[int, Path, Path]] = []
+        for idx, pdf_file in enumerate(pdf_files):
+            try:
+                rel_path = pdf_file.relative_to(folder)
+            except ValueError:
+                rel_path = pdf_file
+            indexed_pdf_files.append((idx, pdf_file, rel_path))
+
+        def _check_pdf(indexed_item: Tuple[int, Path, Path]) -> Tuple[int, str, List[str]]:
+            idx, pdf_file, rel_path = indexed_item
+            try:
+                warnings = check_file(
+                    str(pdf_file),
+                    max_pages=max_pages,
+                    min_pages=min_pages,
+                    style=style,
+                    timeout=timeout,
+                    main_pages=main_pages,
+                    check_ieee_spacing=check_ieee_spacing,
+                    check_reference_font_size=check_reference_font_size,
+                )
+            except Exception as e:
+                warnings = [f"Error processing file: {str(e)[:100]}"]
+            return idx, str(rel_path), warnings
+
+        ordered_results: Dict[int, Tuple[str, List[str]]] = {}
+        completed = 0
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_to_relpath = {
+                executor.submit(_check_pdf, indexed_item): indexed_item[2]
+                for indexed_item in indexed_pdf_files
+            }
+
+            for future in as_completed(future_to_relpath):
+                completed += 1
+                rel_path = future_to_relpath[future]
+                print(f"Checking file {completed}/{len(pdf_files)}: {rel_path}")
+
+                idx, rel_path_str, warnings = future.result()
+                ordered_results[idx] = (rel_path_str, warnings)
+
+        for idx in range(len(pdf_files)):
+            rel_path_str, warnings = ordered_results[idx]
+            results.append((rel_path_str, warnings))
+            if warnings:
+                failed += 1
+            else:
+                passed += 1
     
     return {"passed": passed, "failed": failed, "results": results}
 
@@ -1249,13 +1686,15 @@ def main():
     )
     parser.add_argument(
         "--check-ieee-spacing",
-        action="store_true",
-        help="Enable the experimental IEEE line-spacing heuristic (off by default).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable the experimental IEEE line-spacing heuristic (on by default; use --no-check-ieee-spacing to disable).",
     )
     parser.add_argument(
         "--check-reference-font-size",
-        action="store_true",
-        help="Also check for font-size shrinking in references (off by default).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Also check for font-size shrinking in references (on by default; use --no-check-reference-font-size to disable).",
     )
     parser.add_argument(
         "--timeout",
@@ -1267,6 +1706,12 @@ def main():
         "--min-pages",
         type=int,
         help="Minimum total pages required (main text + references)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of PDFs to process concurrently in folder mode (default: auto).",
     )
     parser.add_argument(
         "--csv",
@@ -1325,6 +1770,7 @@ def main():
             main_pages=args.main_pages,
             check_ieee_spacing=args.check_ieee_spacing,
             check_reference_font_size=args.check_reference_font_size,
+            workers=args.workers,
         )
         
         if "error" in result:

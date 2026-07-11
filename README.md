@@ -6,7 +6,8 @@ A command-line tool for academic conference submissions that automatically valid
 
 - **Page limit checking** – Warn when the number of pages exceeds a configurable limit.
 - **References position** – Detect if references start after the allowed page.
-- **Content validation** – Flag occurrences of figures, tables, and appendices on pages that should contain references only.
+- **Content validation** – Flag figures/tables on pages that should contain references only.
+- **Appendix outside main pages** – Identify appendix sections that appear after the configured main-page limit.
 - **Style conformance** – Verify conformance to ACM or IEEE citation style.
 - **References format check** – Detect non-standard references styles such as bullet points, author-year entries, or plain numbering without brackets.
 - **Anonymity checks** – Detect non-anonymous emails mentioned on page 1.
@@ -14,6 +15,7 @@ A command-line tool for academic conference submissions that automatically valid
 - **Metadata inspection** – Inspect PDF metadata for possible author information that could reveal identity.
 - **Font size detection** – Flag PDFs where font size decreases in the main content/body area; optional extra check for reference-section shrink.
 - **IEEE spacing check** – Optional heuristic to flag IEEE submissions where line spacing appears compressed, including unusually tight spacing after section/subsection headings.
+- **IEEE column size check** – Detect potential IEEE layout tampering, including non-standard column widths, reduced distance between columns, and single-column body pages.
 
 ## Options
 
@@ -43,24 +45,29 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Configuration**: Requires `--max-pages` and uses `--main-pages` (default 10).
 - **Note**: Ensures main text does not exceed limit and references are properly placed.
 
-### 3. Figures/Tables/Appendix After References Check
-- **Logic**: After locating the references section, scans subsequent pages for keywords "Figure", "Table", or "Appendix" (case-insensitive). Lists page numbers where found.
+### 3. Figures/Tables After References Check
+- **Logic**: After locating the references section, scans subsequent pages for figure/table markers and lists page numbers where found.
 - **Configuration**: None (automatic if references are found).
 - **Note**: Uses word boundaries to avoid false positives.
 
-### 4. Style Detection Check
+### 4. Appendix Outside Main Pages Check
+- **Logic**: Scans pages after `--main-pages` for appendix section headers such as `Appendix`, `Appendix A`, or `Appendices`.
+- **Configuration**: `--main-pages` (default 10).
+- **Output**: Emits a warning with page numbers where appendix headers are detected outside the main-page window.
+
+### 5. Style Detection Check
 - **Logic**: Searches the first two pages for style-specific keywords:
   - ACM: "acm" or "association for computing machinery"
   - IEEE: "ieee" or "institute of electrical and electronics engineers"
 - **Configuration**: `--style acm` or `--style ieee` (optional). If specified, warns on mismatch. If not, reports detected style.
 - **Note**: Only reports if ACM or IEEE is detected.
 
-### 5. Email Detection Check
+### 6. Email Detection Check
 - **Logic**: Uses regex to search for email patterns on the first page.
 - **Configuration**: None (always checked).
 - **Regex**: `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`
 
-### 6. Non-Standard References Format Check
+### 7. Non-Standard References Format Check
 - **Logic**: Scans reference entries and validates expected bracketed numeric format such as `[1] Author, Title, Venue, Year`.
 - **Detects**:
   - Bullet-point references (for example, `- Author, Title...`)
@@ -68,17 +75,17 @@ The tool performs the following checks on each PDF. All checks require successfu
   - Author-year style entries (for example, `Smith et al. (2020) ...`)
 - **Output**: Emits a warning including detected non-standard format categories.
 
-### 7. Suspicious Wording Check
+### 8. Suspicious Wording Check
 - **Logic**: Searches the entire document for predefined phrases (case-insensitive).
 - **Configuration**: Hardcoded phrases: "our previous paper", "in our previous work".
 - **Note**: Warns for each matching phrase found.
 
-### 8. Metadata Check
+### 9. Metadata Check
 - **Logic**: Extracts PDF metadata (e.g., author, title) and checks if any fields contain text.
 - **Configuration**: None (always checked).
 - **Note**: Metadata often includes identifying information like author names.
 
-### 9. Font Size Detection Check
+### 10. Font Size Detection Check
 - **Logic**: Analyzes font sizes across the paper using the first 3 pages as baseline. It checks both the main content area and the references section. Flags if any checked page has a font size that decreases by more than 10% from the baseline.
 - **Configuration**: Main-content check is automatic; reference-section check requires `--check-reference-font-size`.
 - **Detection scope**: Main content area (determined by `--main-pages` parameter, default 10). References pages are checked only when `--check-reference-font-size` is enabled.
@@ -88,7 +95,7 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Example warning**: `Font size decreases in main content starting from page 6 (from 10.1pt to 9.0pt, 10% reduction).`
 - **Note**: This detects a common technique to fit more content by reducing font size mid-document. The check is flexible and detects font shrinking at any point in the main content, not just at a specific page.
 
-### 10. IEEE Line Spacing Check
+### 11. IEEE Line Spacing Check
 - **Logic**: Uses PDF text positions to estimate vertical gaps between adjacent lines, builds a baseline from the early body pages, and flags later pages when prose lines are consistently tighter than that baseline.
 - **Configuration**: Active only when both `--style ieee` and `--check-ieee-spacing` are used.
 - **Detects**:
@@ -97,6 +104,20 @@ The tool performs the following checks on each PDF. All checks require successfu
 - **Detection scope**: Main-content pages only; pages dominated by figures or tables are skipped when possible.
 - **Output**: Emits a warning with the page number and whether the issue looks like general line compression or a heading-to-paragraph spacing issue.
 - **Note**: This is an experimental supporting heuristic intended to catch layout tightening that may violate IEEE spacing expectations. It depends on extractable PDF layout information and may miss image-only PDFs.
+
+### 12. IEEE Column Size and Gap Check
+- **Logic**: Uses per-line x coordinates to estimate left/right column envelopes and compare them against IEEE two-column geometry. The IEEEtran class defaults are approximately:
+  - Column width: 21pc (about 252pt)
+  - Column gap (`\columnsep`): 1pc (about 12pt)
+  - Text width: 43pc (about 516pt)
+- **Configuration**: Active when `--style ieee` is used.
+- **Detects**:
+  - Pages that look like single-column body layout
+  - Non-standard column widths relative to IEEE expectations and early-page baseline
+  - Narrowed inter-column spacing (reduced column gap)
+- **Detection scope**: Main-content pages only (stops before references when references are detected).
+- **Output**: Emits warnings with affected page numbers, e.g. `Column width appears non-standard for IEEE layout...` or `Distance between columns appears narrower than IEEE expectations...`.
+- **Note**: This check is heuristic and depends on extractable text geometry. It may not trigger on scanned/image-only PDFs.
 
 ## Installation
 
