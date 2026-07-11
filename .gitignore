@@ -4,3 +4,22 @@ report.csv
 
 
 MyNotes.txt
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# macOS / editor artifacts
+.DS_Store
+.vscode/
